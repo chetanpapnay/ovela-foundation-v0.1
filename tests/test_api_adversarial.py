@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 from fastapi.testclient import TestClient
 
@@ -1247,3 +1247,95 @@ def test_authorization_rejects_missing_currency(monkeypatch):
 
     assert body["allowed"] is False
     assert "currency" in body["reason"].lower()
+def test_internal_key_does_not_trim_configured_secret(monkeypatch):
+    monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret ")
+
+    response = client.get(
+        "/internal/events",
+        headers={
+            "X-Ovela-Internal-Key": "correct-secret",
+        },
+    )
+
+    assert response.status_code == 403
+    assert "authorization failed" in response.json()["detail"].lower()
+def test_request_size_limit_rejects_conflicting_content_length_headers():
+    response = client.post(
+        "/internal/events",
+        headers=[
+            ("Content-Length", "1"),
+            ("Content-Length", "999999"),
+        ],
+        content=b"{}",
+    )
+
+    assert response.status_code == 400
+    assert "content-length" in response.json()["detail"].lower()
+def test_request_size_limit_rejects_oversized_declared_content_length():
+    response = client.post(
+        "/internal/events",
+        headers={
+            "Content-Length": str(256 * 1024 + 1),
+        },
+        content=b"",
+    )
+
+    assert response.status_code == 413
+    assert "too large" in response.json()["detail"].lower()
+import asyncio
+
+from app.main import MAX_REQUEST_BODY_BYTES, RequestSizeLimitMiddleware
+
+
+def test_request_size_limit_rejects_oversized_chunked_body_without_content_length():
+    messages = [
+        {
+            "type": "http.request",
+            "body": b"a" * MAX_REQUEST_BODY_BYTES,
+            "more_body": True,
+        },
+        {
+            "type": "http.request",
+            "body": b"b",
+            "more_body": True,
+        },
+    ]
+
+    sent_messages = []
+
+    async def receive():
+        return messages.pop(0)
+
+    async def send(message):
+        sent_messages.append(message)
+
+    async def downstream(scope, receive, send):
+        raise AssertionError(
+            "oversized request must be rejected before reaching the application"
+        )
+
+    middleware = RequestSizeLimitMiddleware(downstream)
+
+    asyncio.run(
+        middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/internal/events",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    )
+
+    assert sent_messages[0]["type"] == "http.response.start"
+    assert sent_messages[0]["status"] == 413
+def test_csp_disables_javascript_execution():
+    response = client.get("/")
+
+    assert response.status_code == 200
+
+    csp = response.headers["Content-Security-Policy"]
+
+    assert "script-src 'none'" in csp
