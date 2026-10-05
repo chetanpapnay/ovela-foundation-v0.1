@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ovela — Foundation</title>
+  <style>
+    :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #e8edf2; background: #080b0f; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 20% 0%, #18212a 0, #080b0f 38%, #050608 100%); }
+    main { max-width: 1120px; margin: auto; padding: 72px 28px; }
+    .eyebrow { letter-spacing: .18em; text-transform: uppercase; font-size: 11px; opacity: .55; }
+    h1 { font-size: clamp(48px, 9vw, 92px); line-height: .95; font-weight: 500; margin: 18px 0; letter-spacing: -.06em; }
+    .lede { max-width: 650px; font-size: 19px; line-height: 1.6; color: #aeb8c2; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); gap: 14px; margin-top: 56px; }
+    .card { padding: 22px; border: 1px solid #26303a; border-radius: 18px; background: rgba(14,18,23,.72); }
+    .status { display: inline-flex; padding: 7px 10px; border-radius: 999px; background: #17231d; color: #9be2b3; font-size: 12px; }
+    .card h2 { font-size: 15px; font-weight: 500; margin: 16px 0 8px; }
+    .card p { color: #87939e; line-height: 1.55; font-size: 14px; margin: 0; }
+    footer { margin-top: 64px; color: #59646f; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">OVELA / FOUNDATION 0.1</div>
+    <h1>Financial intelligence,<br>built to refuse unsafe certainty.</h1>
+    <p class="lede">A local-first foundation for evidence-backed finance. The interface is intentionally quiet; the security and provenance boundaries live underneath it.</p>
+    <div class="grid">
+      <section class="card"><span class="status">ACTIVE</span><h2>Immutable event foundation</h2><p>Financial events are append-only in the prototype and protected against source-event replay.</p></section>
+      <section class="card"><span class="status">ACTIVE</span><h2>Decimal money</h2><p>Monetary values use decimal arithmetic rather than binary floating-point shortcuts.</p></section>
+      <section class="card"><span class="status">ACTIVE</span><h2>Security boundary</h2><p>The conversation layer cannot directly authorize high-impact financial actions.</p></section>
+      <section class="card"><span class="status">BUILDING</span><h2>Evidence & provenance</h2><p>The foundation is being expanded toward full source, verification, reconciliation and legal lineage.</p></section>
+    </div>
+    <footer>Ovela is not connected to a bank, payment rail, or live financial account in this build.</footer>
+  </main>
+</body>
+</html>
