@@ -19,6 +19,8 @@ Security guarantees:
 - External content cannot grant privilege.
 - The caller cannot bypass authorization by supplying an
   unexpected authorization state.
+- Payment authorization rejects incomplete transaction intent
+  before execution is permitted.
 """
 
 from __future__ import annotations
@@ -146,23 +148,20 @@ def _is_valid_currency(currency: object) -> bool:
     """
     Return True only for a valid three-letter currency code.
 
-    This is intentionally checked again at the authorization boundary
-    instead of relying only on Pydantic model validation.
-
-    The defense protects direct callers and hostile ActionRequest
-    subclasses from bypassing payment authorization with malformed
-    currency values.
+    This is intentionally enforced at the authorization boundary as
+    defense-in-depth, even though ActionRequest validation also
+    constrains the field.
     """
 
     if not isinstance(currency, str):
         return False
 
-    currency = currency.strip()
+    normalized = currency.strip()
 
-    if len(currency) != 3:
-        return False
-
-    return currency.isalpha()
+    return (
+        len(normalized) == 3
+        and normalized.isalpha()
+    )
 
 
 def _is_protected_action(action_type: object) -> bool:
@@ -194,6 +193,7 @@ def authorize_action(action: ActionRequest) -> SecurityDecision:
     6. Unexpected authorization states are denied.
     7. This function never grants privilege merely because content claims
        authority.
+    8. Incomplete payment intent is rejected before authorization succeeds.
     """
 
     if action is None:
