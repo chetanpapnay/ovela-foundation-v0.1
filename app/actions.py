@@ -16,17 +16,20 @@ Security principles:
 - Authorization and execution use separate independent snapshots.
 - Authorization-side mutation cannot alter execution intent.
 - External content has no authority over execution.
+- Security-relevant time comes from the trusted temporal boundary.
+- The execution timestamp is captured once per successful execution.
+- Callers cannot supply ledger timestamps through execute().
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from threading import RLock
 
 from .ledger import AppendOnlyLedger, LedgerConflict
 from .models import ActionRequest, EvidenceStatus, EventType, FinancialEvent
 from .security import authorize_action
+from .temporal_context import from_server_clock
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,10 @@ class ActionExecutor:
 
     An action that has successfully produced a ledger event is marked
     as executed and cannot be executed again by this executor.
+
+    Temporal authority is deliberately not accepted through execute().
+    Financial event timestamps are resolved internally through the
+    trusted temporal boundary.
     """
 
     def __init__(self, ledger: AppendOnlyLedger):
@@ -78,6 +85,8 @@ class ActionExecutor:
                 ↓
             validate execution snapshot
                 ↓
+            resolve trusted temporal context
+                ↓
             append exactly one ledger event
                 ↓
             mark action executed
@@ -97,6 +106,14 @@ class ActionExecutor:
         - subclass model_dump() overrides cannot affect the boundary
         - authorization mutation cannot affect execution
         - execution uses only the isolated execution snapshot
+
+        The temporal boundary is also explicit:
+
+        - production execution obtains time only through
+          from_server_clock()
+        - execute() accepts no caller-supplied timestamp
+        - datetime.now() is never called directly by this module
+        - one trusted timestamp is reused for event_date and recorded_at
 
         The lock covers the authorization-to-ledger boundary so two
         concurrent calls cannot execute the same action simultaneously.
@@ -285,8 +302,26 @@ class ActionExecutor:
                 )
 
             # ----------------------------------------------------------
-            # 9. Build the immutable financial event exclusively from
-            #    the isolated execution snapshot.
+            # 9. Resolve trusted temporal context.
+            #
+            # The caller cannot provide or influence the temporal
+            # context through execute().
+            #
+            # The temporal boundary is responsible for obtaining the
+            # authoritative server timestamp.
+            #
+            # One timestamp is captured and reused for the complete
+            # financial event so event_date and recorded_at cannot drift.
+            # ----------------------------------------------------------
+
+            temporal_context = from_server_clock("UTC")
+
+            event_timestamp = temporal_context.timestamp_utc
+
+            # ----------------------------------------------------------
+            # 10. Build the immutable financial event exclusively from
+            #     the isolated execution snapshot and trusted temporal
+            #     context.
             # ----------------------------------------------------------
 
             event = FinancialEvent(
@@ -297,14 +332,14 @@ class ActionExecutor:
                 amount=execution_snapshot.amount,
                 currency=currency,
                 direction="DEBIT",
-                event_date=datetime.now(timezone.utc),
-                recorded_at=datetime.now(timezone.utc),
+                event_date=event_timestamp,
+                recorded_at=event_timestamp,
                 evidence_status=EvidenceStatus.USER_CONFIRMED,
                 note=f"Payment action {action_id}",
             )
 
             # ----------------------------------------------------------
-            # 10. Commit exactly one ledger event.
+            # 11. Commit exactly one ledger event.
             #
             # LedgerConflict is treated as a failed execution. The
             # action is NOT marked executed unless the ledger accepts it.
@@ -323,7 +358,7 @@ class ActionExecutor:
                 )
 
             # ----------------------------------------------------------
-            # 11. Only mark the action executed after the ledger commit.
+            # 12. Only mark the action executed after the ledger commit.
             # ----------------------------------------------------------
 
             self._executed_actions.add(action_id)
