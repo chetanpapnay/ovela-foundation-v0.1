@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Final
@@ -36,14 +36,24 @@ class AuthorizationContextInvalid(AuthorizationContextError):
 @dataclass(frozen=True, slots=True)
 class AuthorizationContext:
     """
-    Trusted authorization context.
+    Authorization context carrying security state and its provenance.
 
-    This object deliberately does not derive security state from an
-    ActionRequest or any externally supplied content.
+    The public constructor validates the structural shape of a context,
+    but a structurally valid object is not automatically trusted.
+
+    Only the trusted issuer marks a context as issuer-authenticated.
+
+    This distinction is deliberate:
+
+        structurally valid != trusted authorization authority
+
+    The authorization boundary must require both:
+    - valid context invariants
+    - trusted issuer provenance
 
     The eventual authentication/session subsystem must establish the
-    values represented here before a sensitive action reaches the
-    execution boundary.
+    underlying authentication evidence before the trusted issuer creates
+    the context.
     """
 
     context_id: UUID
@@ -52,6 +62,18 @@ class AuthorizationContext:
     state: AuthorizationState
     issued_at: datetime
     expires_at: datetime
+
+    # Private provenance marker.
+    #
+    # This is excluded from equality/repr so the external shape of the
+    # context remains stable. Direct construction receives None and is
+    # therefore structurally valid but untrusted. The trusted issuer
+    # inserts the private singleton marker.
+    _issuer_marker: object = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.context_id, UUID):
@@ -90,6 +112,19 @@ class AuthorizationContext:
                 "expires_at must be later than issued_at"
             )
 
+    def is_trusted(self) -> bool:
+        """
+        Return whether this context carries trusted issuer provenance.
+
+        A structurally valid AuthorizationContext is not sufficient for
+        authorization. Only the trusted issuer can attach the internal
+        provenance marker.
+
+        This method does not grant authority; it only exposes the
+        provenance state to the authorization boundary.
+        """
+        return self._issuer_marker is _INTERNAL_CONTEXT_MARKER
+
     def is_expired(self, now: datetime) -> bool:
         """
         Determine whether this context is expired at the supplied time.
@@ -116,6 +151,15 @@ class AuthorizationContext:
         if self.is_expired(now):
             raise AuthorizationContextExpired(
                 "authorization context has expired"
+            )
+
+    def require_trusted(self) -> None:
+        """
+        Fail closed if the context was not issued by the trusted issuer.
+        """
+        if not self.is_trusted():
+            raise AuthorizationContextInvalid(
+                "authorization context lacks trusted issuer provenance"
             )
 
     def permits_authenticated(self) -> bool:
@@ -155,16 +199,27 @@ _INTERNAL_ISSUER_CAPABILITY: Final[_IssuerCapability] = _IssuerCapability(
 )
 
 
+# Separate opaque provenance marker.
+
+# A context is trusted only when this exact in-process object identity is
+# attached by the issuer. A caller cannot manufacture an equivalent marker
+# through ordinary values such as strings, UUIDs, booleans, or enums.
+#
+# This is a process-local capability boundary. It is not intended to defend
+# against arbitrary code execution inside the trusted Python process itself.
+_INTERNAL_CONTEXT_MARKER: Final[object] = object()
+
+
 class TrustedAuthorizationContextIssuer:
     """
     Narrow issuance boundary for trusted authorization contexts.
 
     This is deliberately separate from ActionRequest.
 
-    The current implementation establishes the structural boundary only.
-    A production authentication subsystem must become the sole legitimate
-    caller that possesses the issuer capability and can establish the
-    underlying authentication evidence.
+    The current implementation establishes the structural and provenance
+    boundary. A production authentication subsystem must become the sole
+    legitimate caller that possesses the issuer capability and can establish
+    the underlying authentication evidence.
 
     No request payload, external content, threat assessment, or conversational
     statement can manufacture this capability.
@@ -212,6 +267,7 @@ class TrustedAuthorizationContextIssuer:
             state=state,
             issued_at=issued_at,
             expires_at=expires_at,
+            _issuer_marker=_INTERNAL_CONTEXT_MARKER,
         )
 
 

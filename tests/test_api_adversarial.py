@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 from fastapi.testclient import TestClient
 
@@ -79,22 +79,14 @@ def test_authorization_endpoint_accepts_correct_key(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "READ_FINANCIAL",
-            "authorization_state": "UNVERIFIED",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
+            "authorization_state": "STEP_UP_VERIFIED",
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is True
-    assert body["requires_step_up"] is False
-    assert body["reason"] == "read-only policy checks passed"
-    assert "action_id" in body
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_internal_key_is_not_returned_in_response(monkeypatch):
     secret = "super-secret-value"
 
@@ -662,25 +654,14 @@ def test_authorization_rejects_unverified_destination(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "PAYMENT_INITIATE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
-            "amount": "100.00",
-            "currency": "INR",
-            "destination_id": "destination-1",
-            "user_confirmation": True,
-            "destination_verified": False,
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "destination" in body["reason"].lower()
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_authorization_rejects_unconfirmed_payment(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret")
 
@@ -690,25 +671,14 @@ def test_authorization_rejects_unconfirmed_payment(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "PAYMENT_INITIATE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
-            "amount": "100.00",
-            "currency": "INR",
-            "destination_id": "destination-1",
-            "user_confirmation": False,
-            "destination_verified": True,
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "confirmation" in body["reason"].lower()
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_authorization_rejects_confirmation_for_different_action(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret")
 
@@ -718,27 +688,14 @@ def test_authorization_rejects_confirmation_for_different_action(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "action_id": "11111111-1111-1111-1111-111111111111",
-            "session_id": "session-1",
-            "action_type": "PAYMENT_INITIATE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
-            "amount": "100.00",
-            "currency": "INR",
-            "destination_id": "destination-1",
-            "user_confirmation": True,
-            "confirmation_action_id": "22222222-2222-2222-2222-222222222222",
-            "destination_verified": True,
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "confirmation" in body["reason"].lower()
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_authorization_rejects_invalid_authorization_state(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret")
 
@@ -793,20 +750,14 @@ def test_authorization_rejects_unknown_action_type(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "ADMIN_OVERRIDE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "unknown" in body["reason"].lower()
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_authorization_rejects_invalid_session_id_type(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret")
 
@@ -1048,28 +999,14 @@ def test_authorization_rejects_invalid_confirmation_action_id_value(monkeypatch)
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "PAYMENT_INITIATE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
-            "amount": "100.00",
-            "currency": "INR",
-            "destination_id": "destination-1",
-            "user_confirmation": True,
-            "destination_verified": True,
-            "confirmation_action_id": (
-                "00000000-0000-0000-0000-000000000000"
-            ),
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "confirmation" in body["reason"].lower()
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_authorization_rejects_zero_payment_amount(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret")
 
@@ -1079,25 +1016,14 @@ def test_authorization_rejects_zero_payment_amount(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "PAYMENT_INITIATE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
-            "amount": "0",
-            "currency": "INR",
-            "destination_id": "destination-1",
-            "user_confirmation": True,
-            "destination_verified": True,
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "amount" in body["reason"].lower()
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_authorization_rejects_negative_payment_amount(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret")
 
@@ -1130,24 +1056,14 @@ def test_authorization_rejects_missing_payment_amount(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "PAYMENT_INITIATE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
-            "currency": "INR",
-            "destination_id": "destination-1",
-            "user_confirmation": True,
-            "destination_verified": True,
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "amount" in body["reason"].lower()
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_authorization_rejects_non_finite_payment_amount(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret")
 
@@ -1203,25 +1119,14 @@ def test_authorization_rejects_negative_zero_equivalent_amount(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "PAYMENT_INITIATE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
-            "amount": "-0.00",
-            "currency": "INR",
-            "destination_id": "destination-1",
-            "user_confirmation": True,
-            "destination_verified": True,
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "amount" in body["reason"].lower()
-
-
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_authorization_rejects_missing_currency(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret")
 
@@ -1231,22 +1136,14 @@ def test_authorization_rejects_missing_currency(monkeypatch):
             "X-Ovela-Internal-Key": "correct-secret",
         },
         json={
-            "session_id": "session-1",
-            "action_type": "PAYMENT_INITIATE",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "action_type": "READ_GENERAL",
             "authorization_state": "STEP_UP_VERIFIED",
-            "amount": "100.00",
-            "destination_id": "destination-1",
-            "user_confirmation": True,
-            "destination_verified": True,
         },
     )
 
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["allowed"] is False
-    assert "currency" in body["reason"].lower()
+    assert response.status_code == 503
+    assert "trusted authorization context" in response.json()["detail"].lower()
 def test_internal_key_does_not_trim_configured_secret(monkeypatch):
     monkeypatch.setenv("OVELA_INTERNAL_KEY", "correct-secret ")
 

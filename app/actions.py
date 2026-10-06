@@ -6,6 +6,9 @@ and a financial ledger side effect.
 
 Security principles:
 - Authorization must succeed before execution.
+- Trusted AuthorizationContext is mandatory.
+- ActionRequest.authorization_state is never treated as authority.
+- Action session identity must match trusted authorization context.
 - Only supported high-impact actions may execute.
 - Payment intent must be complete and internally consistent.
 - An action ID may execute at most once per executor instance.
@@ -26,8 +29,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import RLock
 
+from .authorization_context import AuthorizationContext
 from .ledger import AppendOnlyLedger, LedgerConflict
-from .models import ActionRequest, EvidenceStatus, EventType, FinancialEvent
+from .models import (
+    ActionRequest,
+    EvidenceStatus,
+    EventType,
+    FinancialEvent,
+)
 from .security import authorize_action
 from .temporal_context import from_server_clock
 
@@ -52,6 +61,10 @@ class ActionExecutor:
     An action that has successfully produced a ledger event is marked
     as executed and cannot be executed again by this executor.
 
+    Authorization authority is deliberately supplied through a trusted
+    AuthorizationContext rather than through caller-controlled fields
+    inside ActionRequest.
+
     Temporal authority is deliberately not accepted through execute().
     Financial event timestamps are resolved internally through the
     trusted temporal boundary.
@@ -65,13 +78,19 @@ class ActionExecutor:
         self._executed_actions: set[str] = set()
         self._lock = RLock()
 
-    def execute(self, action: ActionRequest) -> ExecutionResult:
+    def execute(
+        self,
+        action: ActionRequest,
+        authorization_context: AuthorizationContext,
+    ) -> ExecutionResult:
         """
         Authorize and execute one action.
 
         Security ordering:
 
             validate request
+                ↓
+            validate trusted authorization context
                 ↓
             capture caller input once
                 ↓
@@ -81,7 +100,7 @@ class ActionExecutor:
                 ↓
             single-use protection
                 ↓
-            authorize authorization snapshot
+            authorize authorization snapshot against trusted context
                 ↓
             validate execution snapshot
                 ↓
@@ -107,6 +126,9 @@ class ActionExecutor:
         - authorization mutation cannot affect execution
         - execution uses only the isolated execution snapshot
 
+        Authorization authority comes exclusively from the supplied
+        AuthorizationContext.
+
         The temporal boundary is also explicit:
 
         - production execution obtains time only through
@@ -123,6 +145,16 @@ class ActionExecutor:
             return ExecutionResult(
                 executed=False,
                 reason="invalid action request",
+                action_id="",
+            )
+
+        if not isinstance(
+            authorization_context,
+            AuthorizationContext,
+        ):
+            return ExecutionResult(
+                executed=False,
+                reason="trusted authorization context is missing or invalid",
                 action_id="",
             )
 
@@ -203,10 +235,17 @@ class ActionExecutor:
             # ----------------------------------------------------------
             # 6. Authorization.
             #
-            # Authorization receives its own isolated snapshot.
+            # Authorization receives:
+            #   - isolated action intent
+            #   - trusted authorization context
+            #
+            # ActionRequest.authorization_state is not authoritative.
             # ----------------------------------------------------------
 
-            decision = authorize_action(authorization_snapshot)
+            decision = authorize_action(
+                authorization_snapshot,
+                authorization_context,
+            )
 
             if not decision.allowed:
                 return ExecutionResult(
@@ -263,7 +302,7 @@ class ActionExecutor:
 
             currency = execution_snapshot.currency.upper()
 
-            if len(currency) != 3:
+            if len(currency) != 3 or not currency.isalpha():
                 return ExecutionResult(
                     executed=False,
                     reason="payment currency must be a three-letter code",

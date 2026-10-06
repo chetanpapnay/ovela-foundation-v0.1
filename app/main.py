@@ -11,7 +11,6 @@ from starlette.types import Receive, Scope, Send
 
 from .ledger import AppendOnlyLedger, LedgerConflict
 from .models import ActionRequest, FinancialEvent
-from .security import authorize_action
 
 
 APP_VERSION = "0.1.1"
@@ -310,11 +309,19 @@ def check_authorization(
     action: ActionRequest,
     _: None = Depends(require_internal_key),
 ):
-    decision = authorize_action(action)
+    """
+    Reject authorization requests until a real trusted auth/session issuer
+    is connected to this API boundary.
 
-    return {
-        "action_id": str(action.action_id),
-        "allowed": decision.allowed,
-        "requires_step_up": decision.requires_step_up,
-        "reason": decision.reason,
-    }
+    The internal API key authenticates the service caller, but it does not
+    establish the end-user AuthorizationContext required by authorize_action.
+    In particular, ActionRequest.authorization_state and ActionRequest.session_id
+    cannot be promoted into trusted authorization authority here.
+
+    Failing closed is intentional until the authentication/session subsystem
+    can supply a provenance-bearing, unexpired, session-bound context.
+    """
+    raise HTTPException(
+        status_code=503,
+        detail="trusted authorization context is unavailable",
+    )

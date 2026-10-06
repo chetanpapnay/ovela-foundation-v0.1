@@ -6,11 +6,16 @@ from typing import ClassVar
 from app.actions import ActionExecutor
 from app.ledger import AppendOnlyLedger
 from app.models import ActionRequest, EventType, FinancialEvent
+from tests.authorization_test_helpers import (
+    DEFAULT_SESSION_ID,
+    trusted_context_for_action,
+    trusted_context_for_session,
+)
 
 
 def payment_action(**overrides):
     values = {
-        "session_id": "session-1",
+        "session_id": DEFAULT_SESSION_ID,
         "action_type": "PAYMENT_INITIATE",
         "authorization_state": "STEP_UP_VERIFIED",
         "amount": Decimal("1000.00"),
@@ -36,7 +41,7 @@ def test_concurrent_duplicate_execution_creates_only_one_event():
     action = payment_action()
 
     def execute():
-        return executor.execute(action)
+        return executor.execute(action, trusted_context_for_action(action))
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: execute(), range(8)))
@@ -61,8 +66,8 @@ def test_different_actions_can_execute_independently():
         destination_id="merchant-2",
     )
 
-    first_result = executor.execute(first)
-    second_result = executor.execute(second)
+    first_result = executor.execute(first, trusted_context_for_action(first))
+    second_result = executor.execute(second, trusted_context_for_action(second))
 
     assert first_result.executed is True
     assert second_result.executed is True
@@ -96,7 +101,7 @@ def test_existing_ledger_conflict_prevents_execution():
 
     ledger.append(existing_event)
 
-    result = executor.execute(action)
+    result = executor.execute(action, trusted_context_for_action(action))
 
     assert result.executed is False
     assert "already" in result.reason.lower()
@@ -111,8 +116,8 @@ def test_two_executors_cannot_execute_same_action_against_shared_ledger():
 
     action = payment_action()
 
-    first = first_executor.execute(action)
-    second = second_executor.execute(action)
+    first = first_executor.execute(action, trusted_context_for_action(action))
+    second = second_executor.execute(action, trusted_context_for_action(action))
 
     assert first.executed is True
     assert second.executed is False
@@ -126,7 +131,7 @@ def test_mutating_action_after_first_execution_cannot_create_second_event():
 
     action = payment_action()
 
-    first = executor.execute(action)
+    first = executor.execute(action, trusted_context_for_action(action))
 
     assert first.executed is True
 
@@ -134,7 +139,7 @@ def test_mutating_action_after_first_execution_cannot_create_second_event():
     action.destination_id = "attacker-destination"
     action.currency = "USD"
 
-    second = executor.execute(action)
+    second = executor.execute(action, trusted_context_for_action(action))
 
     assert second.executed is False
     assert len(ledger.all()) == 1
@@ -143,7 +148,7 @@ def test_mutating_action_after_first_execution_cannot_create_second_event():
 
     assert event.amount == Decimal("1000.00")
     assert event.currency == "INR"
-    assert event.account_id == "session-1"
+    assert event.account_id == DEFAULT_SESSION_ID
     assert event.source_event_id == str(action.action_id)
 
 
@@ -153,7 +158,7 @@ def test_currency_is_normalized_before_ledger_commit():
 
     action = payment_action(currency="inr")
 
-    result = executor.execute(action)
+    result = executor.execute(action, trusted_context_for_action(action))
 
     assert result.executed is True
     assert ledger.all()[0].currency == "INR"
@@ -163,7 +168,7 @@ def test_invalid_action_object_fails_closed():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    result = executor.execute(object())
+    result = executor.execute(object(), trusted_context_for_session())
 
     assert result.executed is False
     assert ledger.all() == []
@@ -175,7 +180,7 @@ def test_zero_amount_cannot_reach_ledger():
 
     action = payment_action(amount=Decimal("0"))
 
-    result = executor.execute(action)
+    result = executor.execute(action, trusted_context_for_action(action))
 
     assert result.executed is False
     assert ledger.all() == []
@@ -206,7 +211,7 @@ def test_action_mutation_between_snapshot_operations_cannot_change_execution_int
             return snapshot
 
     values = {
-        "session_id": "session-1",
+        "session_id": DEFAULT_SESSION_ID,
         "action_type": "PAYMENT_INITIATE",
         "authorization_state": "STEP_UP_VERIFIED",
         "amount": Decimal("100.00"),
@@ -222,7 +227,7 @@ def test_action_mutation_between_snapshot_operations_cannot_change_execution_int
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    result = executor.execute(action)
+    result = executor.execute(action, trusted_context_for_action(action))
 
     assert result.executed is True
 
@@ -251,7 +256,7 @@ def test_invalid_action_id_type_is_rejected():
     ):
         ActionRequest(
             action_id="not-a-valid-uuid",
-            session_id="session-1",
+            session_id=DEFAULT_SESSION_ID,
             action_type="PAYMENT_INITIATE",
             authorization_state="STEP_UP_VERIFIED",
             amount=Decimal("100.00"),
@@ -278,7 +283,7 @@ def test_invalid_confirmation_action_id_type_is_rejected():
 def test_model_construct_invalid_action_id_is_rejected_by_execution_boundary():
     action = ActionRequest.model_construct(
         action_id="not-a-valid-uuid",
-        session_id="session-1",
+        session_id=DEFAULT_SESSION_ID,
         action_type="PAYMENT_INITIATE",
         authorization_state="STEP_UP_VERIFIED",
         amount=Decimal("100.00"),
@@ -295,7 +300,7 @@ def test_model_construct_invalid_action_id_is_rejected_by_execution_boundary():
     with __import__("pytest").raises(
         __import__("pydantic").ValidationError
     ):
-        executor.execute(action)
+        executor.execute(action, trusted_context_for_action(action))
 
     assert ledger.all() == []
 
@@ -316,7 +321,7 @@ def test_model_copy_unvalidated_update_cannot_bypass_execution_boundary():
     with __import__("pytest").raises(
         __import__("pydantic").ValidationError
     ):
-        executor.execute(forged_action)
+        executor.execute(forged_action, trusted_context_for_action(forged_action))
 
     assert ledger.all() == []
 
@@ -343,7 +348,7 @@ def test_forged_valid_confirmation_uuid_cannot_bypass_binding():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    result = executor.execute(forged_action)
+    result = executor.execute(forged_action, trusted_context_for_action(forged_action))
 
     assert result.executed is False
     assert "confirmation" in result.reason.lower()
@@ -501,7 +506,7 @@ def test_ledger_rejects_non_financial_event_object():
     assert ledger.all() == []
 def test_ledger_rejects_invalid_model_construct_event():
     event = FinancialEvent.model_construct(
-        account_id="session-1",
+        account_id=DEFAULT_SESSION_ID,
         source_id="ATTACKER",
         source_event_id="forged-event",
         event_type=EventType.EXPENSE,
@@ -655,12 +660,12 @@ def test_executor_handles_ambiguous_ledger_commit_without_duplicate_event():
 
     action = payment_action()
 
-    first = executor.execute(action)
+    first = executor.execute(action, trusted_context_for_action(action))
 
     assert first.executed is False
     assert len(ledger.all()) == 1
 
-    second = executor.execute(action)
+    second = executor.execute(action, trusted_context_for_action(action))
 
     assert second.executed is False
     assert len(ledger.all()) == 1

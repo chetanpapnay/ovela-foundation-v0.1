@@ -8,6 +8,8 @@ from app.ledger import AppendOnlyLedger, LedgerConflict
 from app.main import app
 from app.models import ActionRequest, EventType, FinancialEvent
 from app.security import authorize_action
+from app.authorization_context import AuthorizationState
+from tests.authorization_test_helpers import trusted_context_for_action
 
 
 def event(**overrides):
@@ -92,7 +94,7 @@ def test_ledger_get_rejects_non_uuid():
 
 def test_payment_requires_step_up_and_confirmation():
     action = ActionRequest(
-        session_id="s1",
+        session_id="00000000-0000-0000-0000-000000000001",
         action_type="PAYMENT_INITIATE",
         authorization_state="AUTHENTICATED",
         amount=Decimal("1000"),
@@ -103,7 +105,13 @@ def test_payment_requires_step_up_and_confirmation():
         destination_verified=True,
     )
 
-    decision = authorize_action(action)
+    decision = authorize_action(
+        action,
+        trusted_context_for_action(
+            action,
+            state=AuthorizationState.AUTHENTICATED,
+        ),
+    )
 
     assert not decision.allowed
     assert decision.requires_step_up
@@ -111,7 +119,7 @@ def test_payment_requires_step_up_and_confirmation():
 
 def test_payment_passes_policy_after_step_up():
     action = ActionRequest(
-        session_id="s1",
+        session_id="00000000-0000-0000-0000-000000000001",
         action_type="PAYMENT_INITIATE",
         authorization_state="STEP_UP_VERIFIED",
         amount=Decimal("1000"),
@@ -123,14 +131,14 @@ def test_payment_passes_policy_after_step_up():
 
     action.confirmation_action_id = action.action_id
 
-    decision = authorize_action(action)
+    decision = authorize_action(action, trusted_context_for_action(action))
 
     assert decision.allowed
 
 
 def test_model_cannot_authorize_payment_without_confirmation():
     action = ActionRequest(
-        session_id="s1",
+        session_id="00000000-0000-0000-0000-000000000001",
         action_type="PAYMENT_INITIATE",
         authorization_state="STEP_UP_VERIFIED",
         amount=Decimal("1000"),
@@ -140,12 +148,12 @@ def test_model_cannot_authorize_payment_without_confirmation():
         destination_verified=True,
     )
 
-    assert not authorize_action(action).allowed
+    assert not authorize_action(action, trusted_context_for_action(action)).allowed
 
 
 def test_zero_payment_amount_is_blocked():
     action = ActionRequest(
-        session_id="s1",
+        session_id="00000000-0000-0000-0000-000000000001",
         action_type="PAYMENT_INITIATE",
         authorization_state="STEP_UP_VERIFIED",
         amount=Decimal("0"),
@@ -157,7 +165,7 @@ def test_zero_payment_amount_is_blocked():
 
     action.confirmation_action_id = action.action_id
 
-    decision = authorize_action(action)
+    decision = authorize_action(action, trusted_context_for_action(action))
 
     assert not decision.allowed
     assert "positive" in decision.reason
@@ -165,7 +173,7 @@ def test_zero_payment_amount_is_blocked():
 
 def test_missing_payment_destination_is_blocked():
     action = ActionRequest(
-        session_id="s1",
+        session_id="00000000-0000-0000-0000-000000000001",
         action_type="PAYMENT_INITIATE",
         authorization_state="STEP_UP_VERIFIED",
         amount=Decimal("100"),
@@ -177,17 +185,23 @@ def test_missing_payment_destination_is_blocked():
 
     action.confirmation_action_id = action.action_id
 
-    assert not authorize_action(action).allowed
+    assert not authorize_action(action, trusted_context_for_action(action)).allowed
 
 
 def test_unverified_identity_cannot_perform_protected_action():
     action = ActionRequest(
-        session_id="s1",
+        session_id="00000000-0000-0000-0000-000000000001",
         action_type="SECURITY_CHANGE",
         authorization_state="UNVERIFIED",
     )
 
-    decision = authorize_action(action)
+    decision = authorize_action(
+        action,
+        trusted_context_for_action(
+            action,
+            state=AuthorizationState.UNVERIFIED,
+        ),
+    )
 
     assert not decision.allowed
 
@@ -195,7 +209,7 @@ def test_unverified_identity_cannot_perform_protected_action():
 def test_invalid_authorization_state_is_rejected_by_model():
     with pytest.raises(ValueError):
         ActionRequest(
-            session_id="s1",
+            session_id="00000000-0000-0000-0000-000000000001",
             action_type="SECURITY_CHANGE",
             authorization_state="ADMIN_OVERRIDE",
         )
@@ -203,17 +217,17 @@ def test_invalid_authorization_state_is_rejected_by_model():
 
 def test_unknown_action_is_blocked():
     action = ActionRequest(
-        session_id="s1",
+        session_id="00000000-0000-0000-0000-000000000001",
         action_type="DO_ANYTHING",
         authorization_state="AUTHENTICATED",
     )
 
-    assert not authorize_action(action).allowed
+    assert not authorize_action(action, trusted_context_for_action(action)).allowed
 
 
 def test_payment_confirmation_must_bind_to_action():
     action = ActionRequest(
-        session_id="s1",
+        session_id="00000000-0000-0000-0000-000000000001",
         action_type="PAYMENT_INITIATE",
         authorization_state="STEP_UP_VERIFIED",
         amount=Decimal("1000"),
@@ -223,7 +237,7 @@ def test_payment_confirmation_must_bind_to_action():
         user_confirmation=True,
     )
 
-    assert not authorize_action(action).allowed
+    assert not authorize_action(action, trusted_context_for_action(action)).allowed
 
 
 def test_http_health():
