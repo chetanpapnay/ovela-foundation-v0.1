@@ -38,11 +38,38 @@ def test_temporal_context_preserves_trusted_timestamp() -> None:
     assert context.local_date == date(2026, 10, 6)
 
 
+def test_temporal_context_rejects_non_datetime_timestamp() -> None:
+    with pytest.raises(TypeError):
+        TemporalContext(
+            timestamp_utc="2026-10-06T12:30:00+00:00",
+            timezone_name="UTC",
+            source=TemporalSource.INJECTED_CLOCK,
+            confidence=TemporalConfidence.TRUSTED,
+        )
+
+
 def test_temporal_context_rejects_naive_timestamp() -> None:
     with pytest.raises(ValueError):
         TemporalContext(
             timestamp_utc=datetime(2026, 10, 6, 12, 30),
             timezone_name="UTC",
+            source=TemporalSource.INJECTED_CLOCK,
+            confidence=TemporalConfidence.TRUSTED,
+        )
+
+
+def test_temporal_context_rejects_non_string_timezone() -> None:
+    with pytest.raises(TypeError):
+        TemporalContext(
+            timestamp_utc=datetime(
+                2026,
+                10,
+                6,
+                12,
+                30,
+                tzinfo=timezone.utc,
+            ),
+            timezone_name=123,
             source=TemporalSource.INJECTED_CLOCK,
             confidence=TemporalConfidence.TRUSTED,
         )
