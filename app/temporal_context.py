@@ -38,11 +38,17 @@ class TemporalContext:
     confidence: TemporalConfidence
 
     def __post_init__(self) -> None:
+        if not isinstance(self.timestamp_utc, datetime):
+            raise TypeError("timestamp_utc must be a datetime")
+
         if self.timestamp_utc.tzinfo is None:
             raise ValueError("timestamp_utc must be timezone-aware")
 
         if self.timestamp_utc.utcoffset() is None:
             raise ValueError("timestamp_utc must have a valid UTC offset")
+
+        if not isinstance(self.timezone_name, str):
+            raise TypeError("timezone_name must be a string")
 
         if not self.timezone_name.strip():
             raise ValueError("timezone_name cannot be empty")
