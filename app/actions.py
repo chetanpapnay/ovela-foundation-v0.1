@@ -44,7 +44,9 @@ from .models import (
     EventType,
     FinancialEvent,
 )
+from .risk import RiskEvaluation
 from .security import authorize_action
+from .step_up import StepUpEvidence
 from .temporal_context import from_server_clock
 
 
@@ -106,6 +108,9 @@ class ActionExecutor:
         action: ActionRequest,
         authorization_context: AuthorizationContext,
         approval_evidence: ApprovalEvidence | None = None,
+        *,
+        risk_evaluation: RiskEvaluation | None = None,
+        step_up_evidence: StepUpEvidence | None = None,
     ) -> ExecutionResult:
         """
         Authorize and execute one action.
@@ -268,8 +273,8 @@ class ActionExecutor:
             # 6. Authorization.
             #
             # Authorization receives:
-            #   - isolated action intent
-            #   - trusted authorization context
+            #    - isolated action intent
+            #    - trusted authorization context
             #
             # ActionRequest.authorization_state is not authoritative.
             # ----------------------------------------------------------
@@ -278,6 +283,8 @@ class ActionExecutor:
                 authorization_snapshot,
                 authorization_context,
                 approval_evidence,
+                risk_evaluation=risk_evaluation,
+                step_up_evidence=step_up_evidence,
             )
 
             if not decision.allowed:
@@ -390,8 +397,8 @@ class ActionExecutor:
 
             # ----------------------------------------------------------
             # 10. Build the immutable financial event exclusively from
-            #     the isolated execution snapshot and trusted temporal
-            #     context.
+            #      the isolated execution snapshot and trusted temporal
+            #      context.
             # ----------------------------------------------------------
 
             event = FinancialEvent(

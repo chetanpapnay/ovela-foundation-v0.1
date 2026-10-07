@@ -25,6 +25,8 @@ Security guarantees:
 - Security-relevant time comes from the trusted temporal boundary.
 - Payment authorization rejects incomplete transaction intent
   before execution is permitted.
+- When a risk evaluation is supplied, the M4 risk/step-up policy gate
+  must also allow the action.
 """
 
 from __future__ import annotations
@@ -46,7 +48,13 @@ from .authorization_context import (
     AuthorizationState,
 )
 from .models import ActionRequest
+from .risk import RiskEvaluation
+from .step_up import StepUpEvidence
 from .temporal_context import from_server_clock
+from .transaction_authorization import (
+    AuthorizationDecision,
+    DefaultTransactionAuthorizationPolicy,
+)
 
 
 class SecurityDecision:
@@ -153,8 +161,7 @@ def _trusted_now() -> datetime:
 
     This function deliberately does not accept caller-supplied time.
     Time comes from the trusted temporal boundary, the same source the
-    execution boundary uses when it consumes approval evidence, so
-    authorization and consumption cannot disagree about the clock.
+    execution boundary uses when it consumes approval evidence.
     """
     return from_server_clock("UTC").timestamp_utc
 
@@ -165,7 +172,7 @@ def _validate_authorization_context(
 ) -> SecurityDecision | None:
     """
     Validate authorization-context provenance, validity, expiry,
-    and session binding.
+    not-before, and session binding.
 
     The ActionRequest's authorization_state is intentionally ignored.
     Authority comes only from the trusted AuthorizationContext.
@@ -354,6 +361,9 @@ def authorize_action(
     action: ActionRequest,
     authorization_context: AuthorizationContext,
     approval_evidence: ApprovalEvidence | None = None,
+    *,
+    risk_evaluation: RiskEvaluation | None = None,
+    step_up_evidence: StepUpEvidence | None = None,
 ) -> SecurityDecision:
     """
     Deterministically authorize an ActionRequest using trusted authority.
@@ -377,6 +387,8 @@ def authorize_action(
     11. Unexpected authorization states are denied.
     12. External content never grants privilege.
     13. Incomplete payment intent is rejected before authorization succeeds.
+    14. When a risk evaluation is supplied, the M4 policy gate must also
+        return ALLOW.
     """
 
     if action is None:
@@ -515,6 +527,25 @@ def authorize_action(
 
         if approval_error is not None:
             return approval_error
+
+    # M4 risk and step-up policy gate. It can only further restrict:
+    # a non-ALLOW decision denies, and it never overrides a denial above.
+    if risk_evaluation is not None:
+        m4_decision = DefaultTransactionAuthorizationPolicy().decide(
+            action=action,
+            authorization_context=authorization_context,
+            risk_evaluation=risk_evaluation,
+            step_up_evidence=step_up_evidence,
+            approval_evidence=approval_evidence,
+            now=_trusted_now(),
+        )
+
+        if m4_decision.decision != AuthorizationDecision.ALLOW:
+            return SecurityDecision(
+                False,
+                f"m4 authorization failed: {m4_decision.reason}",
+                m4_decision.decision == AuthorizationDecision.STEP_UP_REQUIRED,
+            )
 
     return SecurityDecision(
         True,
