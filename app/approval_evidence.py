@@ -1,10 +1,35 @@
+"""
+Trusted approval evidence and single-use consumption stores.
+
+ApprovalEvidence is trusted proof that one exact transaction was explicitly
+approved. This module also defines the ``ApprovalStore`` protocol that every
+single-use consumption backend implements, plus the in-memory implementation
+and the legacy ``ApprovalEvidenceRegistry``.
+
+Backends
+--------
+- ``InMemoryApprovalStore``: process-local, thread-safe. Not shared between
+  workers or restarts.
+- ``ApprovalEvidenceRegistry``: the M1-M4 registry, preserved exactly. It adds
+  an optional legacy ``ApprovalConsumptionStore`` for shared consumption.
+- ``app.durable_approval_store.DurableApprovalStore``: tenant-scoped, durable,
+  atomic consumption through a single-statement SQL UPDATE.
+
+Tenant semantics
+----------------
+``ApprovalEvidence.tenant_id`` is optional so legacy evidence stays valid.
+Every store requires ``evidence.tenant_id == tenant_id`` at consumption time.
+The durable store additionally rejects ``None`` on either side (no implicit
+system tenant).
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from threading import RLock
-from typing import Final
+from typing import Final, Protocol, cast, runtime_checkable
 from uuid import UUID, uuid4
 
 from .approval_store import (
@@ -53,6 +78,7 @@ class ApprovalEvidence:
     - currency
     - approval time
     - expiry
+    - tenant (optional; required by durable stores)
 
     Structural validity is not the same as trusted provenance.
     """
@@ -75,6 +101,9 @@ class ApprovalEvidence:
         compare=False,
     )
 
+    # Declared last so legacy positional constructions remain valid.
+    tenant_id: UUID | None = None
+
     def __post_init__(self) -> None:
         if not isinstance(self.approval_id, UUID):
             raise TypeError("approval_id must be a UUID")
@@ -87,6 +116,9 @@ class ApprovalEvidence:
 
         if not isinstance(self.subject_id, UUID):
             raise TypeError("subject_id must be a UUID")
+
+        if self.tenant_id is not None and not isinstance(self.tenant_id, UUID):
+            raise TypeError("tenant_id must be a UUID or None")
 
         if not isinstance(self.destination_id, str):
             raise TypeError("destination_id must be a string")
@@ -300,6 +332,7 @@ class TrustedApprovalEvidenceIssuer:
         currency: str,
         approved_at: datetime,
         expires_at: datetime,
+        tenant_id: UUID | None = None,
     ) -> ApprovalEvidence:
         """Issue trusted approval evidence."""
         cls._validate_capability(capability)
@@ -315,6 +348,7 @@ class TrustedApprovalEvidenceIssuer:
             approved_at=approved_at,
             expires_at=expires_at,
             _issuer_marker=_INTERNAL_APPROVAL_MARKER,
+            tenant_id=tenant_id,
         )
 
 
@@ -328,6 +362,7 @@ def _issue_internal_approval_evidence(
     currency: str,
     approved_at: datetime,
     expires_at: datetime,
+    tenant_id: UUID | None = None,
 ) -> ApprovalEvidence:
     """
     Private application hook for the future approval subsystem.
@@ -344,12 +379,150 @@ def _issue_internal_approval_evidence(
         currency=currency,
         approved_at=approved_at,
         expires_at=expires_at,
+        tenant_id=tenant_id,
     )
 
 
-class ApprovalEvidenceRegistry:
+@runtime_checkable
+class ApprovalStore(Protocol):
+    """
+    Single-use consumption boundary for trusted approval evidence.
+
+    Implementations must make ``consume`` atomic: for a given approval,
+    exactly one call may ever return ``True``, even under concurrency.
+    """
+
+    __slots__ = ()
+
+    def register(self, evidence: ApprovalEvidence) -> None:
+        """
+        Record trusted evidence so it can later be consumed.
+
+        Raises ApprovalEvidenceInvalid for untrusted, malformed or duplicate
+        evidence. Never silently overwrites an existing registration.
+        """
+        ...
+
+    def consume(
+        self,
+        evidence: ApprovalEvidence,
+        now: datetime,
+        *,
+        tenant_id: UUID | None = None,
+        executor_id: UUID | None = None,
+    ) -> bool:
+        """
+        Atomically consume evidence.
+
+        Returns True only for the single successful consumption and False
+        when the approval cannot be consumed because it was already used.
+        Invalid, untrusted, expired or cross-tenant evidence raises.
+        """
+        ...
+
+    def is_consumed(self, approval_id: UUID) -> bool:
+        """Return whether the approval has been consumed."""
+        ...
+
+
+def _validate_for_consumption(
+    evidence: object,
+    now: datetime,
+    tenant_id: UUID | None,
+) -> ApprovalEvidence:
+    """
+    Shared pre-consumption validation: type, provenance, validity window,
+    and tenant binding. Raises; never returns a partially valid result.
+    """
+    if not isinstance(evidence, ApprovalEvidence):
+        raise ApprovalEvidenceInvalid(
+            "approval evidence is missing or invalid"
+        )
+
+    evidence.require_valid_at(now)
+
+    if tenant_id is not None and not isinstance(tenant_id, UUID):
+        raise TypeError("tenant_id must be a UUID or None")
+
+    if evidence.tenant_id != tenant_id:
+        raise ApprovalEvidenceInvalid(
+            "approval evidence tenant does not match the consuming tenant"
+        )
+
+    return evidence
+
+
+class InMemoryApprovalStore(ApprovalStore):
+    """
+    Thread-safe, process-local ``ApprovalStore``.
+
+    Consumption is atomic within the process (lock). It is NOT shared
+    between worker processes or preserved across restarts; use a durable
+    store for that. Registration is optional for consumption, which keeps
+    M1-M4 behavior: evidence may be consumed without prior ``register``.
+    """
+
+    __slots__ = (
+        "_consumed",
+        "_lock",
+        "_registered",
+    )
+
+    def __init__(self) -> None:
+        self._consumed: set[UUID] = set()
+        self._registered: set[UUID] = set()
+        self._lock = RLock()
+
+    def register(self, evidence: ApprovalEvidence) -> None:
+        if not isinstance(evidence, ApprovalEvidence):
+            raise ApprovalEvidenceInvalid(
+                "approval evidence is missing or invalid"
+            )
+
+        evidence.require_trusted()
+
+        with self._lock:
+            if evidence.approval_id in self._registered:
+                raise ApprovalEvidenceInvalid(
+                    "approval evidence is already registered"
+                )
+
+            self._registered.add(evidence.approval_id)
+
+    def consume(
+        self,
+        evidence: ApprovalEvidence,
+        now: datetime,
+        *,
+        tenant_id: UUID | None = None,
+        executor_id: UUID | None = None,
+    ) -> bool:
+        validated = _validate_for_consumption(evidence, now, tenant_id)
+
+        with self._lock:
+            if validated.approval_id in self._consumed:
+                return False
+
+            self._consumed.add(validated.approval_id)
+            return True
+
+    def is_consumed(self, approval_id: UUID) -> bool:
+        if not isinstance(approval_id, UUID):
+            raise TypeError("approval_id must be a UUID")
+
+        with self._lock:
+            return approval_id in self._consumed
+
+
+_MISSING_NOW: Final[datetime] = cast(datetime, object())
+
+
+class ApprovalEvidenceRegistry(InMemoryApprovalStore):
     """
     Thread-safe single-use registry for trusted approval evidence.
+
+    This is the M1-M4 registry, preserved: same constructor, same
+    exceptions, same lock behavior. It is now an ``InMemoryApprovalStore``.
 
     Consumption is atomic within the process (lock) and, when a shared
     ApprovalConsumptionStore is configured, atomic across processes and
@@ -359,15 +532,15 @@ class ApprovalEvidenceRegistry:
     (fail closed). The registry never falls back to memory-only
     consumption when a store was configured.
 
+    Unlike the base store, ``consume`` here keeps its legacy contract:
+    it returns None on success and RAISES ``ApprovalEvidenceConsumed`` on
+    reuse instead of returning False.
+
     The registry does not create authority. It only prevents the same
     trusted approval evidence from being successfully consumed twice.
     """
 
-    __slots__ = (
-        "_consumed",
-        "_lock",
-        "_store",
-    )
+    __slots__ = ("_store",)
 
     def __init__(
         self,
@@ -381,8 +554,7 @@ class ApprovalEvidenceRegistry:
                 "store must be an ApprovalConsumptionStore or None"
             )
 
-        self._consumed: set[UUID] = set()
-        self._lock = RLock()
+        super().__init__()
         self._store = store
 
     @classmethod
@@ -393,27 +565,32 @@ class ApprovalEvidenceRegistry:
         """
         return cls(store=store_from_environment())
 
-    def consume(
+    def consume(  # type: ignore[override]
         self,
         approval: ApprovalEvidence,
+        now: datetime = _MISSING_NOW,
         *,
-        now: datetime,
+        tenant_id: UUID | None = None,
+        executor_id: UUID | None = None,
     ) -> None:
         """
         Atomically validate and consume one approval.
 
         The approval is consumed only after trusted provenance, expiry,
-        not-before, and single-use checks succeed.
+        not-before, tenant binding, and single-use checks succeed.
+
+        ``executor_id`` is accepted for protocol compatibility and is not
+        recorded by the in-memory registry.
         """
-        if not isinstance(approval, ApprovalEvidence):
-            raise ApprovalEvidenceInvalid(
-                "approval evidence is missing or invalid"
+        if now is _MISSING_NOW:
+            raise TypeError(
+                "consume() missing required argument: 'now'"
             )
 
-        approval.require_valid_at(now)
+        validated = _validate_for_consumption(approval, now, tenant_id)
 
         with self._lock:
-            if approval.approval_id in self._consumed:
+            if validated.approval_id in self._consumed:
                 raise ApprovalEvidenceConsumed(
                     "approval evidence has already been consumed"
                 )
@@ -421,8 +598,8 @@ class ApprovalEvidenceRegistry:
             if self._store is not None:
                 try:
                     first_use = self._store.try_consume(
-                        approval.approval_id,
-                        approval.expires_at,
+                        validated.approval_id,
+                        validated.expires_at,
                     )
                 except Exception as exc:
                     raise ApprovalEvidenceInvalid(
@@ -430,12 +607,12 @@ class ApprovalEvidenceRegistry:
                     ) from exc
 
                 if first_use is not True:
-                    self._consumed.add(approval.approval_id)
+                    self._consumed.add(validated.approval_id)
                     raise ApprovalEvidenceConsumed(
                         "approval evidence has already been consumed"
                     )
 
-            self._consumed.add(approval.approval_id)
+            self._consumed.add(validated.approval_id)
 
     def is_consumed(self, approval_id: UUID) -> bool:
         """Return whether an approval ID has already been consumed."""
