@@ -9,6 +9,10 @@ from app.main import app
 from app.models import ActionRequest, EventType, FinancialEvent
 from app.security import authorize_action
 from app.authorization_context import AuthorizationState
+from tests.approval_test_helpers import (
+    execute_with_trusted_approval,
+    trusted_approval_for_action,
+)
 from tests.authorization_test_helpers import trusted_context_for_action
 
 
@@ -131,12 +135,14 @@ def test_payment_passes_policy_after_step_up():
 
     action.confirmation_action_id = action.action_id
 
-    decision = authorize_action(action, trusted_context_for_action(action))
+    context = trusted_context_for_action(action)
+    approval = trusted_approval_for_action(action, context)
+    decision = authorize_action(action, context, approval)
 
     assert decision.allowed
 
 
-def test_model_cannot_authorize_payment_without_confirmation():
+def test_caller_confirmation_flags_are_not_authority():
     action = ActionRequest(
         session_id="00000000-0000-0000-0000-000000000001",
         action_type="PAYMENT_INITIATE",
@@ -148,7 +154,10 @@ def test_model_cannot_authorize_payment_without_confirmation():
         destination_verified=True,
     )
 
-    assert not authorize_action(action, trusted_context_for_action(action)).allowed
+    context = trusted_context_for_action(action)
+    approval = trusted_approval_for_action(action, context)
+
+    assert authorize_action(action, context, approval).allowed
 
 
 def test_zero_payment_amount_is_blocked():

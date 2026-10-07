@@ -4,8 +4,12 @@ from decimal import Decimal
 from typing import ClassVar
 
 from app.actions import ActionExecutor
-from app.ledger import AppendOnlyLedger
+from app.ledger import AppendOnlyLedger, LedgerConflict
 from app.models import ActionRequest, EventType, FinancialEvent
+from tests.approval_test_helpers import (
+    execute_with_trusted_approval,
+    trusted_approval_for_action,
+)
 from tests.authorization_test_helpers import (
     DEFAULT_SESSION_ID,
     trusted_context_for_action,
@@ -41,7 +45,7 @@ def test_concurrent_duplicate_execution_creates_only_one_event():
     action = payment_action()
 
     def execute():
-        return executor.execute(action, trusted_context_for_action(action))
+        return execute_with_trusted_approval(executor, action)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: execute(), range(8)))
@@ -66,8 +70,8 @@ def test_different_actions_can_execute_independently():
         destination_id="merchant-2",
     )
 
-    first_result = executor.execute(first, trusted_context_for_action(first))
-    second_result = executor.execute(second, trusted_context_for_action(second))
+    first_result = execute_with_trusted_approval(executor, first)
+    second_result = execute_with_trusted_approval(executor, second)
 
     assert first_result.executed is True
     assert second_result.executed is True
@@ -101,7 +105,7 @@ def test_existing_ledger_conflict_prevents_execution():
 
     ledger.append(existing_event)
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = execute_with_trusted_approval(executor, action)
 
     assert result.executed is False
     assert "already" in result.reason.lower()
@@ -116,8 +120,8 @@ def test_two_executors_cannot_execute_same_action_against_shared_ledger():
 
     action = payment_action()
 
-    first = first_executor.execute(action, trusted_context_for_action(action))
-    second = second_executor.execute(action, trusted_context_for_action(action))
+    first = execute_with_trusted_approval(first_executor, action)
+    second = execute_with_trusted_approval(second_executor, action)
 
     assert first.executed is True
     assert second.executed is False
@@ -131,7 +135,7 @@ def test_mutating_action_after_first_execution_cannot_create_second_event():
 
     action = payment_action()
 
-    first = executor.execute(action, trusted_context_for_action(action))
+    first = execute_with_trusted_approval(executor, action)
 
     assert first.executed is True
 
@@ -139,7 +143,7 @@ def test_mutating_action_after_first_execution_cannot_create_second_event():
     action.destination_id = "attacker-destination"
     action.currency = "USD"
 
-    second = executor.execute(action, trusted_context_for_action(action))
+    second = execute_with_trusted_approval(executor, action)
 
     assert second.executed is False
     assert len(ledger.all()) == 1
@@ -158,7 +162,7 @@ def test_currency_is_normalized_before_ledger_commit():
 
     action = payment_action(currency="inr")
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = execute_with_trusted_approval(executor, action)
 
     assert result.executed is True
     assert ledger.all()[0].currency == "INR"
@@ -179,8 +183,9 @@ def test_zero_amount_cannot_reach_ledger():
     executor = ActionExecutor(ledger)
 
     action = payment_action(amount=Decimal("0"))
+    context = trusted_context_for_action(action)
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = executor.execute(action, context)
 
     assert result.executed is False
     assert ledger.all() == []
@@ -227,7 +232,7 @@ def test_action_mutation_between_snapshot_operations_cannot_change_execution_int
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = execute_with_trusted_approval(executor, action)
 
     assert result.executed is True
 
@@ -321,25 +326,19 @@ def test_model_copy_unvalidated_update_cannot_bypass_execution_boundary():
     with __import__("pytest").raises(
         __import__("pydantic").ValidationError
     ):
-        executor.execute(forged_action, trusted_context_for_action(forged_action))
+        executor.execute(
+            forged_action,
+            trusted_context_for_action(forged_action),
+        )
 
     assert ledger.all() == []
 
 
-def test_forged_valid_confirmation_uuid_cannot_bypass_binding():
+def test_confirmation_field_cannot_bypass_or_block_approval_binding():
     action = payment_action()
-
-    forged_action = action.model_copy(
-        update={
-            "confirmation_action_id": action.action_id,
-        }
-    )
-
-    forged_action.confirmation_action_id = action.action_id
-
     other_action = payment_action()
 
-    forged_action = forged_action.model_copy(
+    forged_action = action.model_copy(
         update={
             "confirmation_action_id": other_action.action_id,
         }
@@ -348,11 +347,17 @@ def test_forged_valid_confirmation_uuid_cannot_bypass_binding():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    result = executor.execute(forged_action, trusted_context_for_action(forged_action))
+    context = trusted_context_for_action(forged_action)
+    approval = trusted_approval_for_action(forged_action, context)
 
-    assert result.executed is False
-    assert "confirmation" in result.reason.lower()
-    assert ledger.all() == []
+    result = executor.execute(
+        forged_action,
+        context,
+        approval,
+    )
+
+    assert result.executed is True
+    assert len(ledger.all()) == 1
 
 
 def test_model_copy_cannot_change_frozen_action_id():
@@ -402,6 +407,8 @@ def test_ledger_rejects_malicious_event_copy_override():
     assert len(stored) == 1
     assert stored[0].amount == Decimal("100.00")
     assert stored[0].currency == "INR"
+
+
 def test_ledger_rejects_malicious_event_dump_override():
     class MaliciousEvent(FinancialEvent):
         def model_dump(self, *args, **kwargs):
@@ -433,6 +440,8 @@ def test_ledger_rejects_malicious_event_dump_override():
     assert len(stored) == 1
     assert stored[0].amount == Decimal("100.00")
     assert stored[0].currency == "INR"
+
+
 def test_ledger_snapshot_mutation_cannot_modify_stored_event():
     action = payment_action()
 
@@ -461,6 +470,8 @@ def test_ledger_snapshot_mutation_cannot_modify_stored_event():
     assert len(stored) == 1
     assert stored[0].amount == Decimal("100.00")
     assert stored[0].currency == "INR"
+
+
 def test_ledger_get_snapshot_mutation_cannot_modify_stored_event():
     action = payment_action()
 
@@ -493,6 +504,8 @@ def test_ledger_get_snapshot_mutation_cannot_modify_stored_event():
     assert stored_after is not None
     assert stored_after.amount == Decimal("100.00")
     assert stored_after.currency == "INR"
+
+
 def test_ledger_rejects_non_financial_event_object():
     class ForgedEvent:
         source_id = "ATTACKER"
@@ -504,6 +517,8 @@ def test_ledger_rejects_non_financial_event_object():
         ledger.append(ForgedEvent())
 
     assert ledger.all() == []
+
+
 def test_ledger_rejects_invalid_model_construct_event():
     event = FinancialEvent.model_construct(
         account_id=DEFAULT_SESSION_ID,
@@ -525,6 +540,8 @@ def test_ledger_rejects_invalid_model_construct_event():
         ledger.append(event)
 
     assert ledger.all() == []
+
+
 def test_ledger_rejects_invalid_model_copy_event():
     action = payment_action()
 
@@ -555,6 +572,8 @@ def test_ledger_rejects_invalid_model_copy_event():
         ledger.append(forged_event)
 
     assert ledger.all() == []
+
+
 def test_ledger_concurrent_duplicate_append_allows_only_one_event():
     ledger = AppendOnlyLedger()
 
@@ -588,12 +607,14 @@ def test_ledger_concurrent_duplicate_append_allows_only_one_event():
             try:
                 future.result()
                 successful += 1
-            except __import__("app.ledger", fromlist=["LedgerConflict"]).LedgerConflict:
+            except LedgerConflict:
                 conflicts += 1
 
     assert successful == 1
     assert conflicts == 99
     assert len(ledger.all()) == 1
+
+
 def test_ledger_failed_append_does_not_create_phantom_event():
     ledger = AppendOnlyLedger()
 
@@ -636,6 +657,8 @@ def test_ledger_failed_append_does_not_create_phantom_event():
     assert stored.amount == Decimal("100.00")
     assert stored.currency == "INR"
     assert len(ledger.all()) == 1
+
+
 def test_executor_handles_ambiguous_ledger_commit_without_duplicate_event():
     class CommitThenFailLedger(AppendOnlyLedger):
         def __init__(self):
@@ -646,12 +669,7 @@ def test_executor_handles_ambiguous_ledger_commit_without_duplicate_event():
             if self._fail_after_commit:
                 self._fail_after_commit = False
                 super().append(event)
-                raise __import__(
-                    "app.ledger",
-                    fromlist=["LedgerConflict"],
-                ).LedgerConflict(
-                    "simulated ambiguous commit"
-                )
+                raise LedgerConflict("simulated ambiguous commit")
 
             return super().append(event)
 
@@ -660,12 +678,12 @@ def test_executor_handles_ambiguous_ledger_commit_without_duplicate_event():
 
     action = payment_action()
 
-    first = executor.execute(action, trusted_context_for_action(action))
+    first = execute_with_trusted_approval(executor, action)
 
     assert first.executed is False
     assert len(ledger.all()) == 1
 
-    second = executor.execute(action, trusted_context_for_action(action))
+    second = execute_with_trusted_approval(executor, action)
 
     assert second.executed is False
     assert len(ledger.all()) == 1

@@ -29,6 +29,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import RLock
 
+from .approval_evidence import (
+    ApprovalEvidence,
+    ApprovalEvidenceConsumed,
+    ApprovalEvidenceExpired,
+    ApprovalEvidenceInvalid,
+    ApprovalEvidenceRegistry,
+)
 from .authorization_context import AuthorizationContext
 from .ledger import AppendOnlyLedger, LedgerConflict
 from .models import (
@@ -39,6 +46,9 @@ from .models import (
 )
 from .security import authorize_action
 from .temporal_context import from_server_clock
+
+
+_DEFAULT_APPROVAL_REGISTRY = ApprovalEvidenceRegistry()
 
 
 @dataclass(frozen=True)
@@ -70,11 +80,24 @@ class ActionExecutor:
     trusted temporal boundary.
     """
 
-    def __init__(self, ledger: AppendOnlyLedger):
+    def __init__(
+        self,
+        ledger: AppendOnlyLedger,
+        approval_registry: ApprovalEvidenceRegistry | None = None,
+    ):
         if not isinstance(ledger, AppendOnlyLedger):
             raise TypeError("ledger must be an AppendOnlyLedger")
 
+        if approval_registry is None:
+            approval_registry = _DEFAULT_APPROVAL_REGISTRY
+
+        if type(approval_registry) is not ApprovalEvidenceRegistry:
+            raise TypeError(
+                "approval_registry must be an ApprovalEvidenceRegistry"
+            )
+
         self._ledger = ledger
+        self._approval_registry = approval_registry
         self._executed_actions: set[str] = set()
         self._lock = RLock()
 
@@ -82,6 +105,7 @@ class ActionExecutor:
         self,
         action: ActionRequest,
         authorization_context: AuthorizationContext,
+        approval_evidence: ApprovalEvidence | None = None,
     ) -> ExecutionResult:
         """
         Authorize and execute one action.
@@ -100,11 +124,13 @@ class ActionExecutor:
                 ↓
             single-use protection
                 ↓
-            authorize authorization snapshot against trusted context
+            authorize authorization snapshot against trusted context and approval
                 ↓
             validate execution snapshot
                 ↓
             resolve trusted temporal context
+                ↓
+            consume single-use trusted approval
                 ↓
             append exactly one ledger event
                 ↓
@@ -245,6 +271,7 @@ class ActionExecutor:
             decision = authorize_action(
                 authorization_snapshot,
                 authorization_context,
+                approval_evidence,
             )
 
             if not decision.allowed:
@@ -316,29 +343,9 @@ class ActionExecutor:
                     action_id=action_id,
                 )
 
-            if execution_snapshot.destination_verified is not True:
-                return ExecutionResult(
-                    executed=False,
-                    reason="payment destination is not verified",
-                    action_id=action_id,
-                )
-
-            if execution_snapshot.user_confirmation is not True:
-                return ExecutionResult(
-                    executed=False,
-                    reason="explicit transaction-bound confirmation is required",
-                    action_id=action_id,
-                )
-
-            if (
-                execution_snapshot.confirmation_action_id
-                != execution_snapshot.action_id
-            ):
-                return ExecutionResult(
-                    executed=False,
-                    reason="confirmation is not bound to this action",
-                    action_id=action_id,
-                )
+            # Caller-controlled destination_verified, user_confirmation,
+            # and confirmation_action_id are deliberately not consulted.
+            # Approval authority comes only from trusted ApprovalEvidence.
 
             # ----------------------------------------------------------
             # 9. Resolve trusted temporal context.
@@ -356,6 +363,24 @@ class ActionExecutor:
             temporal_context = from_server_clock("UTC")
 
             event_timestamp = temporal_context.timestamp_utc
+
+            try:
+                self._approval_registry.consume(
+                    approval_evidence,
+                    now=event_timestamp,
+                )
+            except (
+                ApprovalEvidenceConsumed,
+                ApprovalEvidenceExpired,
+                ApprovalEvidenceInvalid,
+                TypeError,
+                ValueError,
+            ):
+                return ExecutionResult(
+                    executed=False,
+                    reason="trusted approval evidence could not be consumed",
+                    action_id=action_id,
+                )
 
             # ----------------------------------------------------------
             # 10. Build the immutable financial event exclusively from

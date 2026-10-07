@@ -5,6 +5,10 @@ from app.actions import ActionExecutor
 from app.authorization_context import AuthorizationState
 from app.ledger import AppendOnlyLedger
 from app.models import ActionRequest, EventType
+from tests.approval_test_helpers import (
+    execute_with_trusted_approval,
+    trusted_approval_for_action,
+)
 from tests.authorization_test_helpers import (
     DEFAULT_SESSION_ID,
     trusted_context_for_action,
@@ -82,7 +86,7 @@ def test_successful_payment_creates_one_ledger_event():
 
     action = payment_action()
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = execute_with_trusted_approval(executor, action)
 
     assert result.executed is True
 
@@ -103,8 +107,8 @@ def test_same_action_cannot_execute_twice():
 
     action = payment_action()
 
-    first = executor.execute(action, trusted_context_for_action(action))
-    second = executor.execute(action, trusted_context_for_action(action))
+    first = execute_with_trusted_approval(executor, action)
+    second = execute_with_trusted_approval(executor, action)
 
     assert first.executed is True
     assert second.executed is False
@@ -113,21 +117,23 @@ def test_same_action_cannot_execute_twice():
     assert len(ledger.all()) == 1
 
 
-def test_confirmation_bound_to_different_action_cannot_execute():
+def test_approval_bound_to_different_action_cannot_execute():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    action = payment_action(
-        confirmation_action_id="00000000-0000-0000-0000-000000000001",
-    )
+    action = payment_action()
+    context = trusted_context_for_action(action)
+    other_action = payment_action()
+    approval = trusted_approval_for_action(other_action, context)
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = executor.execute(action, context, approval)
 
     assert result.executed is False
+    assert "approval" in result.reason.lower()
     assert ledger.all() == []
 
 
-def test_unverified_destination_cannot_execute():
+def test_caller_destination_flag_cannot_block_valid_approval():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
@@ -135,10 +141,10 @@ def test_unverified_destination_cannot_execute():
         destination_verified=False,
     )
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = execute_with_trusted_approval(executor, action)
 
-    assert result.executed is False
-    assert ledger.all() == []
+    assert result.executed is True
+    assert len(ledger.all()) == 1
 
 
 def test_missing_destination_cannot_execute():
@@ -149,7 +155,8 @@ def test_missing_destination_cannot_execute():
         destination_id=None,
     )
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    context = trusted_context_for_action(action)
+    result = executor.execute(action, context)
 
     assert result.executed is False
     assert ledger.all() == []
@@ -163,7 +170,8 @@ def test_zero_amount_cannot_execute():
         amount=Decimal("0"),
     )
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    context = trusted_context_for_action(action)
+    result = executor.execute(action, context)
 
     assert result.executed is False
     assert ledger.all() == []
@@ -178,7 +186,7 @@ def test_currency_is_preserved_in_ledger_event():
         currency="usd",
     )
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = execute_with_trusted_approval(executor, action)
 
     assert result.executed is True
 
@@ -188,7 +196,7 @@ def test_currency_is_preserved_in_ledger_event():
     assert events[0].currency == "USD"
 
 
-def test_failed_execution_does_not_write_ledger_event():
+def test_caller_confirmation_flag_cannot_block_valid_approval():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
@@ -196,7 +204,7 @@ def test_failed_execution_does_not_write_ledger_event():
         user_confirmation=False,
     )
 
-    result = executor.execute(action, trusted_context_for_action(action))
+    result = execute_with_trusted_approval(executor, action)
 
-    assert result.executed is False
-    assert ledger.all() == []
+    assert result.executed is True
+    assert len(ledger.all()) == 1

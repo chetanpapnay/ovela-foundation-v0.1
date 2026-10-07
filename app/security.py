@@ -31,7 +31,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
+from .approval_evidence import (
+    ApprovalEvidence,
+    ApprovalEvidenceExpired,
+    ApprovalEvidenceInvalid,
+)
 from .authorization_context import (
     AuthorizationContext,
     AuthorizationContextExpired,
@@ -278,9 +284,72 @@ def _requires_step_up(action_type: object) -> bool:
     return action_type in HIGH_IMPACT
 
 
+def _validate_payment_approval(
+    action: ActionRequest,
+    authorization_context: AuthorizationContext,
+    approval_evidence: ApprovalEvidence | None,
+    destination_id: str,
+    amount: Decimal,
+    currency: str,
+) -> SecurityDecision | None:
+    """Validate trusted, transaction-bound approval evidence."""
+
+    if type(approval_evidence) is not ApprovalEvidence:
+        return SecurityDecision(
+            False,
+            "trusted approval evidence is missing or invalid",
+        )
+
+    try:
+        approval_evidence.require_trusted()
+        approval_evidence.require_valid_at(_trusted_now())
+    except (
+        ApprovalEvidenceExpired,
+        ApprovalEvidenceInvalid,
+        ValueError,
+        TypeError,
+    ):
+        return SecurityDecision(
+            False,
+            "trusted approval evidence is expired, invalid, or lacks trusted provenance",
+        )
+
+    action_session_id = _safe_action_value(action, "session_id")
+
+    if not isinstance(action_session_id, str):
+        return SecurityDecision(
+            False,
+            "action session is missing or invalid",
+        )
+
+    try:
+        session_id = UUID(action_session_id.strip())
+    except (ValueError, AttributeError):
+        return SecurityDecision(
+            False,
+            "action session is not a valid UUID",
+        )
+
+    if not approval_evidence.matches_transaction(
+        action_id=action.action_id,
+        session_id=session_id,
+        subject_id=authorization_context.subject_id,
+        destination_id=destination_id,
+        amount=amount,
+        currency=currency,
+    ):
+        return SecurityDecision(
+            False,
+            "approval evidence does not exactly match the transaction",
+        )
+
+    return None
+
+
 def authorize_action(
     action: ActionRequest,
     authorization_context: AuthorizationContext,
+    approval_evidence: ApprovalEvidence | None = None,
 ) -> SecurityDecision:
     """
     Deterministically authorize an ActionRequest using trusted authority.
@@ -295,16 +364,14 @@ def authorize_action(
     6. READ_FINANCIAL and READ_HIGH_SENSITIVITY require authentication.
     7. Protected actions require an authenticated trusted context.
     8. High-impact actions require STEP_UP_VERIFIED.
-    9. Payment actions require:
-       - a destination
-       - a verified destination
-       - a finite positive Decimal amount
-       - a valid uppercase three-letter currency code
-       - explicit user confirmation
-       - confirmation bound to the current action ID
-    10. Unexpected authorization states are denied.
-    11. External content never grants privilege.
-    12. Incomplete payment intent is rejected before authorization succeeds.
+    9. Payment actions require trusted, unexpired, transaction-bound
+       ApprovalEvidence matching action, session, subject, destination,
+       amount, and currency.
+    10. Caller-controlled confirmation and destination-verification fields
+        are not authority.
+    11. Unexpected authorization states are denied.
+    12. External content never grants privilege.
+    13. Incomplete payment intent is rejected before authorization succeeds.
     """
 
     if action is None:
@@ -410,17 +477,6 @@ def authorize_action(
                 "payment destination is missing",
             )
 
-        destination_verified = _safe_action_value(
-            action,
-            "destination_verified",
-        )
-
-        if destination_verified is not True:
-            return SecurityDecision(
-                False,
-                "payment destination is not verified",
-            )
-
         amount = _safe_action_value(
             action,
             "amount",
@@ -443,36 +499,17 @@ def authorize_action(
                 "payment currency is required and must be an uppercase three-letter code",
             )
 
-        user_confirmation = _safe_action_value(
+        approval_error = _validate_payment_approval(
             action,
-            "user_confirmation",
+            authorization_context,
+            approval_evidence,
+            destination_id,
+            amount,
+            currency,
         )
 
-        if user_confirmation is not True:
-            return SecurityDecision(
-                False,
-                "explicit transaction-bound confirmation is required",
-            )
-
-        action_id = _safe_action_value(
-            action,
-            "action_id",
-        )
-
-        confirmation_action_id = _safe_action_value(
-            action,
-            "confirmation_action_id",
-        )
-
-        if (
-            not action_id
-            or not confirmation_action_id
-            or confirmation_action_id != action_id
-        ):
-            return SecurityDecision(
-                False,
-                "confirmation is not bound to this action",
-            )
+        if approval_error is not None:
+            return approval_error
 
     return SecurityDecision(
         True,
