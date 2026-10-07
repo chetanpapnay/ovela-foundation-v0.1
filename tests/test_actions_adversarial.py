@@ -3,9 +3,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import ClassVar
 
+import pytest
+
 from app.actions import ActionExecutor
+from app.approval_evidence import ApprovalEvidenceInvalid
 from app.ledger import AppendOnlyLedger, LedgerConflict
 from app.models import ActionRequest, EventType, FinancialEvent
+from pydantic import ValidationError
 from tests.approval_test_helpers import (
     execute_with_trusted_approval,
     trusted_approval_for_action,
@@ -183,11 +187,12 @@ def test_zero_amount_cannot_reach_ledger():
     executor = ActionExecutor(ledger)
 
     action = payment_action(amount=Decimal("0"))
+
     context = trusted_context_for_action(action)
 
-    result = executor.execute(action, context)
+    with pytest.raises(ApprovalEvidenceInvalid):
+        trusted_approval_for_action(action, context)
 
-    assert result.executed is False
     assert ledger.all() == []
 
 
@@ -195,7 +200,7 @@ def test_negative_amount_cannot_reach_ledger():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    with __import__("pytest").raises(ValueError):
+    with pytest.raises(ValueError):
         payment_action(amount=Decimal("-1.00"))
 
     assert ledger.all() == []
@@ -247,18 +252,14 @@ def test_action_id_cannot_be_mutated_after_creation():
 
     original_action_id = action.action_id
 
-    with __import__("pytest").raises(
-        __import__("pydantic").ValidationError
-    ):
+    with pytest.raises(ValidationError):
         action.action_id = original_action_id
 
     assert action.action_id == original_action_id
 
 
 def test_invalid_action_id_type_is_rejected():
-    with __import__("pytest").raises(
-        __import__("pydantic").ValidationError
-    ):
+    with pytest.raises(ValidationError):
         ActionRequest(
             action_id="not-a-valid-uuid",
             session_id=DEFAULT_SESSION_ID,
@@ -277,9 +278,7 @@ def test_invalid_confirmation_action_id_type_is_rejected():
 
     original_confirmation_action_id = action.confirmation_action_id
 
-    with __import__("pytest").raises(
-        __import__("pydantic").ValidationError
-    ):
+    with pytest.raises(ValidationError):
         action.confirmation_action_id = "not-a-valid-uuid"
 
     assert action.confirmation_action_id == original_confirmation_action_id
@@ -302,9 +301,7 @@ def test_model_construct_invalid_action_id_is_rejected_by_execution_boundary():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    with __import__("pytest").raises(
-        __import__("pydantic").ValidationError
-    ):
+    with pytest.raises(ValidationError):
         executor.execute(action, trusted_context_for_action(action))
 
     assert ledger.all() == []
@@ -323,9 +320,7 @@ def test_model_copy_unvalidated_update_cannot_bypass_execution_boundary():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    with __import__("pytest").raises(
-        __import__("pydantic").ValidationError
-    ):
+    with pytest.raises(ValidationError):
         executor.execute(
             forged_action,
             trusted_context_for_action(forged_action),
@@ -346,15 +341,10 @@ def test_confirmation_field_cannot_bypass_or_block_approval_binding():
 
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
-
     context = trusted_context_for_action(forged_action)
     approval = trusted_approval_for_action(forged_action, context)
 
-    result = executor.execute(
-        forged_action,
-        context,
-        approval,
-    )
+    result = executor.execute(forged_action, context, approval)
 
     assert result.executed is True
     assert len(ledger.all()) == 1
@@ -366,7 +356,7 @@ def test_model_copy_cannot_change_frozen_action_id():
     original_action_id = action.action_id
     replacement_action_id = payment_action().action_id
 
-    with __import__("pytest").raises(TypeError):
+    with pytest.raises(TypeError):
         action.model_copy(
             update={
                 "action_id": replacement_action_id,
@@ -513,7 +503,7 @@ def test_ledger_rejects_non_financial_event_object():
 
     ledger = AppendOnlyLedger()
 
-    with __import__("pytest").raises(TypeError):
+    with pytest.raises(TypeError):
         ledger.append(ForgedEvent())
 
     assert ledger.all() == []
@@ -534,9 +524,7 @@ def test_ledger_rejects_invalid_model_construct_event():
 
     ledger = AppendOnlyLedger()
 
-    with __import__("pytest").raises(
-        __import__("pydantic").ValidationError
-    ):
+    with pytest.raises(ValidationError):
         ledger.append(event)
 
     assert ledger.all() == []
@@ -566,9 +554,7 @@ def test_ledger_rejects_invalid_model_copy_event():
 
     ledger = AppendOnlyLedger()
 
-    with __import__("pytest").raises(
-        __import__("pydantic").ValidationError
-    ):
+    with pytest.raises(ValidationError):
         ledger.append(forged_event)
 
     assert ledger.all() == []
@@ -647,7 +633,7 @@ def test_ledger_failed_append_does_not_create_phantom_event():
 
     ledger.append = fail_before_commit
 
-    with __import__("pytest").raises(RuntimeError):
+    with pytest.raises(RuntimeError):
         ledger.append(event)
 
     assert ledger.all() == []
@@ -669,7 +655,9 @@ def test_executor_handles_ambiguous_ledger_commit_without_duplicate_event():
             if self._fail_after_commit:
                 self._fail_after_commit = False
                 super().append(event)
-                raise LedgerConflict("simulated ambiguous commit")
+                raise LedgerConflict(
+                    "simulated ambiguous commit"
+                )
 
             return super().append(event)
 
