@@ -209,10 +209,16 @@ class ActionExecutor:
         #
         # Calling ActionRequest.model_dump(captured) invokes the trusted
         # base implementation directly and bypasses subclass overrides.
+        #
+        # warnings=False: unvalidated objects (model_construct()/
+        # model_copy(update=...)) may hold invalid values. Pydantic would
+        # emit a serializer UserWarning here. The real rejection happens
+        # in model_validate() below, which raises ValidationError.
         # --------------------------------------------------------------
 
         captured_data = ActionRequest.model_dump(
             captured,
+            warnings=False,
         )
 
         # --------------------------------------------------------------

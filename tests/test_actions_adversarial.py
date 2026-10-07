@@ -4,12 +4,11 @@ from decimal import Decimal
 from typing import ClassVar
 
 import pytest
+from pydantic import ValidationError
 
 from app.actions import ActionExecutor
-from app.approval_evidence import ApprovalEvidenceInvalid
 from app.ledger import AppendOnlyLedger, LedgerConflict
 from app.models import ActionRequest, EventType, FinancialEvent
-from pydantic import ValidationError
 from tests.approval_test_helpers import (
     execute_with_trusted_approval,
     trusted_approval_for_action,
@@ -176,7 +175,10 @@ def test_invalid_action_object_fails_closed():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    result = executor.execute(object(), trusted_context_for_session())
+    result = executor.execute(
+        object(),
+        trusted_context_for_session(),
+    )
 
     assert result.executed is False
     assert ledger.all() == []
@@ -186,19 +188,29 @@ def test_zero_amount_cannot_reach_ledger():
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
 
-    action = payment_action(amount=Decimal("0"))
+    action = payment_action()
 
     context = trusted_context_for_action(action)
+    approval = trusted_approval_for_action(action, context)
 
-    with pytest.raises(ApprovalEvidenceInvalid):
-        trusted_approval_for_action(action, context)
+    forged_zero_amount_action = action.model_copy(
+        update={
+            "amount": Decimal("0"),
+        }
+    )
 
+    result = executor.execute(
+        forged_zero_amount_action,
+        context,
+        approval,
+    )
+
+    assert result.executed is False
     assert ledger.all() == []
 
 
 def test_negative_amount_cannot_reach_ledger():
     ledger = AppendOnlyLedger()
-    executor = ActionExecutor(ledger)
 
     with pytest.raises(ValueError):
         payment_action(amount=Decimal("-1.00"))
@@ -302,7 +314,10 @@ def test_model_construct_invalid_action_id_is_rejected_by_execution_boundary():
     executor = ActionExecutor(ledger)
 
     with pytest.raises(ValidationError):
-        executor.execute(action, trusted_context_for_action(action))
+        executor.execute(
+            action,
+            trusted_context_for_action(action),
+        )
 
     assert ledger.all() == []
 
@@ -341,10 +356,15 @@ def test_confirmation_field_cannot_bypass_or_block_approval_binding():
 
     ledger = AppendOnlyLedger()
     executor = ActionExecutor(ledger)
+
     context = trusted_context_for_action(forged_action)
     approval = trusted_approval_for_action(forged_action, context)
 
-    result = executor.execute(forged_action, context, approval)
+    result = executor.execute(
+        forged_action,
+        context,
+        approval,
+    )
 
     assert result.executed is True
     assert len(ledger.all()) == 1
@@ -655,9 +675,7 @@ def test_executor_handles_ambiguous_ledger_commit_without_duplicate_event():
             if self._fail_after_commit:
                 self._fail_after_commit = False
                 super().append(event)
-                raise LedgerConflict(
-                    "simulated ambiguous commit"
-                )
+                raise LedgerConflict("simulated ambiguous commit")
 
             return super().append(event)
 
