@@ -7,6 +7,11 @@ from threading import RLock
 from typing import Final
 from uuid import UUID, uuid4
 
+from .approval_store import (
+    ApprovalConsumptionStore,
+    store_from_environment,
+)
+
 
 # Tolerance for clock differences between the issuer and the verifier.
 # Evidence dated further in the future than this is rejected.
@@ -346,7 +351,13 @@ class ApprovalEvidenceRegistry:
     """
     Thread-safe single-use registry for trusted approval evidence.
 
-    Consumption is atomic.
+    Consumption is atomic within the process (lock) and, when a shared
+    ApprovalConsumptionStore is configured, atomic across processes and
+    restarts (the store's atomic first-use insert).
+
+    If the shared store fails for any reason, consumption is refused
+    (fail closed). The registry never falls back to memory-only
+    consumption when a store was configured.
 
     The registry does not create authority. It only prevents the same
     trusted approval evidence from being successfully consumed twice.
@@ -355,11 +366,32 @@ class ApprovalEvidenceRegistry:
     __slots__ = (
         "_consumed",
         "_lock",
+        "_store",
     )
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        store: ApprovalConsumptionStore | None = None,
+    ) -> None:
+        if store is not None and not isinstance(
+            store,
+            ApprovalConsumptionStore,
+        ):
+            raise TypeError(
+                "store must be an ApprovalConsumptionStore or None"
+            )
+
         self._consumed: set[UUID] = set()
         self._lock = RLock()
+        self._store = store
+
+    @classmethod
+    def from_environment(cls) -> "ApprovalEvidenceRegistry":
+        """
+        Build a registry using the shared SQL Server store when
+        OVELA_APPROVAL_DB_CONNECTION is set, otherwise memory only.
+        """
+        return cls(store=store_from_environment())
 
     def consume(
         self,
@@ -386,6 +418,23 @@ class ApprovalEvidenceRegistry:
                     "approval evidence has already been consumed"
                 )
 
+            if self._store is not None:
+                try:
+                    first_use = self._store.try_consume(
+                        approval.approval_id,
+                        approval.expires_at,
+                    )
+                except Exception as exc:
+                    raise ApprovalEvidenceInvalid(
+                        "approval store unavailable; failing closed"
+                    ) from exc
+
+                if first_use is not True:
+                    self._consumed.add(approval.approval_id)
+                    raise ApprovalEvidenceConsumed(
+                        "approval evidence has already been consumed"
+                    )
+
             self._consumed.add(approval.approval_id)
 
     def is_consumed(self, approval_id: UUID) -> bool:
@@ -394,4 +443,10 @@ class ApprovalEvidenceRegistry:
             raise TypeError("approval_id must be a UUID")
 
         with self._lock:
-            return approval_id in self._consumed
+            if approval_id in self._consumed:
+                return True
+
+            if self._store is not None:
+                return self._store.is_consumed(approval_id)
+
+            return False
