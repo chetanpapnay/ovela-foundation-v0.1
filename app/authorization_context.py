@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Final
 from uuid import UUID, uuid4
+
+
+# Tolerance for clock differences between the issuer and the verifier.
+# Contexts dated further in the future than this are rejected.
+_MAX_CLOCK_SKEW: Final[timedelta] = timedelta(seconds=5)
 
 
 class AuthorizationState(StrEnum):
@@ -144,13 +149,38 @@ class AuthorizationContext:
             timezone.utc
         )
 
+    def is_not_yet_valid(self, now: datetime) -> bool:
+        """
+        Return whether this context is dated in the future.
+
+        A small clock-skew tolerance is allowed so a context issued a
+        moment ago is not rejected because of minor clock differences.
+        """
+        if not isinstance(now, datetime):
+            raise TypeError("now must be a datetime")
+
+        if now.tzinfo is None:
+            raise AuthorizationContextInvalid(
+                "now must be timezone-aware"
+            )
+
+        return (
+            self.issued_at.astimezone(timezone.utc)
+            > now.astimezone(timezone.utc) + _MAX_CLOCK_SKEW
+        )
+
     def require_valid_at(self, now: datetime) -> None:
         """
-        Fail closed if the context is expired.
+        Fail closed if the context is expired or dated in the future.
         """
         if self.is_expired(now):
             raise AuthorizationContextExpired(
                 "authorization context has expired"
+            )
+
+        if self.is_not_yet_valid(now):
+            raise AuthorizationContextInvalid(
+                "authorization context is not yet valid"
             )
 
     def require_trusted(self) -> None:

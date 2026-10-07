@@ -9,26 +9,27 @@ ActionRequest objects using a trusted AuthorizationContext.
 
 Security guarantees:
 - Unknown actions are denied.
-- Missing, invalid, expired, or untrusted authorization context is denied.
+- Missing, invalid, expired, future-dated, or untrusted authorization
+  context is denied.
 - The ActionRequest cannot assert its own authorization authority.
 - Action sessions must match the trusted authorization context.
 - General reads remain available according to policy.
 - Financial reads require authenticated authorization.
 - High-sensitivity reads require authenticated authorization.
 - High-impact actions require step-up verification.
-- Payment actions require destination verification,
-  positive finite Decimal amount, valid currency, and
-  transaction-bound confirmation.
+- Payment actions require trusted, transaction-bound approval evidence,
+  positive finite Decimal amount, and valid currency.
 - External content cannot grant privilege.
 - Caller-supplied authorization_state is never trusted.
 - Authorization is re-evaluated at the security boundary.
+- Security-relevant time comes from the trusted temporal boundary.
 - Payment authorization rejects incomplete transaction intent
   before execution is permitted.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -45,6 +46,7 @@ from .authorization_context import (
     AuthorizationState,
 )
 from .models import ActionRequest
+from .temporal_context import from_server_clock
 
 
 class SecurityDecision:
@@ -147,12 +149,14 @@ def _safe_action_value(
 
 def _trusted_now() -> datetime:
     """
-    Return the current server-side UTC time.
+    Return the current trusted UTC time.
 
     This function deliberately does not accept caller-supplied time.
-    Authorization expiry must be evaluated against trusted runtime time.
+    Time comes from the trusted temporal boundary, the same source the
+    execution boundary uses when it consumes approval evidence, so
+    authorization and consumption cannot disagree about the clock.
     """
-    return datetime.now(timezone.utc)
+    return from_server_clock("UTC").timestamp_utc
 
 
 def _validate_authorization_context(
@@ -357,7 +361,8 @@ def authorize_action(
     Security rules:
 
     1. Invalid or unknown action types are denied.
-    2. A valid, unexpired, trusted AuthorizationContext is mandatory.
+    2. A valid, unexpired, not-future-dated, trusted AuthorizationContext
+       is mandatory.
     3. The action session must match the trusted context session.
     4. ActionRequest.authorization_state is never trusted.
     5. READ_GENERAL is available without authentication.

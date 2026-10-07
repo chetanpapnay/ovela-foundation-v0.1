@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from threading import RLock
 from typing import Final
 from uuid import UUID, uuid4
+
+
+# Tolerance for clock differences between the issuer and the verifier.
+# Evidence dated further in the future than this is rejected.
+_MAX_CLOCK_SKEW: Final[timedelta] = timedelta(seconds=5)
 
 
 class ApprovalEvidenceError(ValueError):
@@ -170,15 +175,41 @@ class ApprovalEvidence:
             self.expires_at.astimezone(timezone.utc)
         )
 
+    def is_not_yet_valid(self, now: datetime) -> bool:
+        """
+        Return whether this approval is dated in the future.
+
+        A small clock-skew tolerance is allowed so evidence issued a
+        moment ago is not rejected because of minor clock differences.
+        """
+        if not isinstance(now, datetime):
+            raise TypeError("now must be a datetime")
+
+        if now.tzinfo is None:
+            raise ApprovalEvidenceInvalid(
+                "now must be timezone-aware"
+            )
+
+        return (
+            self.approved_at.astimezone(timezone.utc)
+            > now.astimezone(timezone.utc) + _MAX_CLOCK_SKEW
+        )
+
     def require_valid_at(self, now: datetime) -> None:
         """
-        Fail closed unless the evidence is trusted and unexpired.
+        Fail closed unless the evidence is trusted, unexpired, and
+        not dated in the future.
         """
         self.require_trusted()
 
         if self.is_expired(now):
             raise ApprovalEvidenceExpired(
                 "approval evidence has expired"
+            )
+
+        if self.is_not_yet_valid(now):
+            raise ApprovalEvidenceInvalid(
+                "approval evidence is not yet valid"
             )
 
     def matches_transaction(
@@ -340,7 +371,7 @@ class ApprovalEvidenceRegistry:
         Atomically validate and consume one approval.
 
         The approval is consumed only after trusted provenance, expiry,
-        and single-use checks succeed.
+        not-before, and single-use checks succeed.
         """
         if not isinstance(approval, ApprovalEvidence):
             raise ApprovalEvidenceInvalid(
