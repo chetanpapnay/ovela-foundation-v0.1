@@ -193,6 +193,7 @@ def test_zero_amount_cannot_reach_ledger():
 
 def test_negative_amount_cannot_reach_ledger():
     ledger = AppendOnlyLedger()
+    executor = ActionExecutor(ledger)
 
     with __import__("pytest").raises(ValueError):
         payment_action(amount=Decimal("-1.00"))
@@ -325,7 +326,10 @@ def test_model_copy_unvalidated_update_cannot_bypass_execution_boundary():
     with __import__("pytest").raises(
         __import__("pydantic").ValidationError
     ):
-        executor.execute(forged_action, trusted_context_for_action(forged_action))
+        executor.execute(
+            forged_action,
+            trusted_context_for_action(forged_action),
+        )
 
     assert ledger.all() == []
 
@@ -598,7 +602,10 @@ def test_ledger_concurrent_duplicate_append_allows_only_one_event():
             try:
                 future.result()
                 successful += 1
-            except __import__("app.ledger", fromlist=["LedgerConflict"]).LedgerConflict:
+            except __import__(
+                "app.ledger",
+                fromlist=["LedgerConflict"],
+            ).LedgerConflict:
                 conflicts += 1
 
     assert successful == 1
@@ -683,3 +690,68 @@ def test_executor_handles_ambiguous_ledger_commit_without_duplicate_event():
 
     assert second.executed is False
     assert len(ledger.all()) == 1
+
+def test_financial_account_context_sets_event_account_id():
+    from uuid import uuid4
+    from app.financial_account_context import _issue_internal_financial_account_context
+    from datetime import datetime, timezone, timedelta
+
+    ledger = AppendOnlyLedger()
+    executor = ActionExecutor(ledger)
+    action = payment_action()
+
+    target_acc_id = uuid4()
+    now = datetime.now(timezone.utc)
+    fac = _issue_internal_financial_account_context(
+        account_id=target_acc_id,
+        subject_id=uuid4(),
+        session_id=uuid4(),
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=5),
+    )
+
+    auth_ctx = trusted_context_for_action(action)
+    approval = trusted_approval_for_action(action, auth_ctx)
+    result = executor.execute(
+        action,
+        auth_ctx,
+        approval,
+        financial_account_context=fac,
+    )
+
+    assert result.executed is True
+    events = ledger.all()
+    assert len(events) == 1
+    assert events[0].account_id == str(target_acc_id)
+
+
+def test_untrusted_financial_account_context_rejected():
+    from uuid import uuid4
+    from app.financial_account_context import FinancialAccountContext
+    from datetime import datetime, timezone, timedelta
+
+    ledger = AppendOnlyLedger()
+    executor = ActionExecutor(ledger)
+    action = payment_action()
+
+    now = datetime.now(timezone.utc)
+    untrusted_fac = FinancialAccountContext(
+        account_id=uuid4(),
+        subject_id=uuid4(),
+        session_id=uuid4(),
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=5),
+    )
+
+    auth_ctx = trusted_context_for_action(action)
+    approval = trusted_approval_for_action(action, auth_ctx)
+    result = executor.execute(
+        action,
+        auth_ctx,
+        approval,
+        financial_account_context=untrusted_fac,
+    )
+
+    assert result.executed is False
+    assert "financial account context" in result.reason
+    assert len(ledger.all()) == 0

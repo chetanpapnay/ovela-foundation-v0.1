@@ -1,0 +1,569 @@
+﻿import React, { useEffect, useRef } from "react";
+import * as THREE from "three";
+import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
+
+export type JurixAvatarMode = "idle" | "greeting" | "listening" | "speaking";
+
+interface JurixWebRTCStageProps {
+  mode: JurixAvatarMode;
+}
+
+export const JurixWebRTCStage: React.FC<JurixWebRTCStageProps> = ({ mode }) => {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const modeRef = useRef<JurixAvatarMode>(mode);
+  const playModeRef = useRef<(name: JurixAvatarMode) => void>(() => {});
+
+
+  useEffect(() => {
+    const container = mountRef.current;
+    if (!container) return;
+
+    let disposed = false;
+    let animId = 0;
+    let mixer: THREE.AnimationMixer | null = null;
+    let activeAction: THREE.AnimationAction | null = null;
+
+    const actions: Record<string, THREE.AnimationAction> = {};
+    const clock = new THREE.Clock();
+
+    const width = container.clientWidth || window.innerWidth;
+    const height = container.clientHeight || window.innerHeight;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 1000);
+    camera.position.set(0, 1.0, 3.6);
+    camera.lookAt(0, 0.8, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(1);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    container.innerHTML = "";
+    container.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xfff1df, 0x4b4650, 1.9));
+
+    const keyLight = new THREE.DirectionalLight(0xffe6ca, 1.9);
+    keyLight.position.set(1.5, 3.5, 3);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0x8ebbd6, 0.32);
+    rimLight.position.set(-2.5, 2, -2);
+    scene.add(rimLight);
+    // JURIX_OFFICE_ENVIRONMENT_V1
+    // First-pass executive office: real geometry, layered skyline and warm lights.
+    scene.background = null;
+
+    const officeRoot = new THREE.Group();
+    officeRoot.name = "JurixExecutiveOffice";
+    scene.add(officeRoot);
+    officeRoot.visible = false;
+
+    const officeFloor = new THREE.Mesh(
+      new THREE.PlaneGeometry(22, 22),
+      new THREE.MeshStandardMaterial({
+        color: 0x555963,
+        roughness: 0.28,
+        metalness: 0.18
+      })
+    );
+    officeFloor.rotation.x = -Math.PI / 2;
+    officeFloor.position.set(0, -0.225, -1);
+    officeFloor.name = "OfficeReflectiveFloor";
+    officeRoot.add(officeFloor);
+
+    const officeMaterials = {
+      frame: new THREE.MeshStandardMaterial({
+        color: 0x252c35,
+        metalness: 0.65,
+        roughness: 0.3
+      }),
+      glass: new THREE.MeshStandardMaterial({
+        color: 0x7ca8c7,
+        emissive: 0x172c42,
+        emissiveIntensity: 0.35,
+        metalness: 0.25,
+        roughness: 0.18,
+        transparent: true,
+        opacity: 0.22,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      }),
+      wall: new THREE.MeshStandardMaterial({
+        color: 0x303641,
+        roughness: 0.72,
+        metalness: 0.12
+      }),
+      desk: new THREE.MeshStandardMaterial({
+        color: 0x25272c,
+        roughness: 0.25,
+        metalness: 0.25
+      }),
+      warm: new THREE.MeshStandardMaterial({
+        color: 0xffd8a0,
+        emissive: 0xffa94d,
+        emissiveIntensity: 1.6,
+        roughness: 0.35
+      }),
+      building: [
+        0x293b50, 0x33485d, 0x263344, 0x405063
+      ].map(color => new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.82,
+        metalness: 0.08
+      }))
+    };
+
+    const addOfficeBox = (
+      name: string,
+      width: number,
+      height: number,
+      depth: number,
+      x: number,
+      y: number,
+      z: number,
+      material: THREE.Material,
+      parent: THREE.Group = officeRoot
+    ) => {
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(width, height, depth),
+        material
+      );
+      mesh.name = name;
+      mesh.position.set(x, y, z);
+      parent.add(mesh);
+      return mesh;
+    };
+
+    // Architectural side piers and top beam frame the window wall.
+    addOfficeBox("LeftStonePier", 0.34, 5.2, 0.34, -4.3, 2.35, -4.1, officeMaterials.wall);
+    addOfficeBox("RightStonePier", 0.34, 5.2, 0.34, 4.3, 2.35, -4.1, officeMaterials.wall);
+    addOfficeBox("WindowTopBeam", 8.9, 0.24, 0.38, 0, 4.85, -4.1, officeMaterials.frame);
+    addOfficeBox("WindowBottomSill", 8.6, 0.13, 0.38, 0, 0.0, -4.1, officeMaterials.frame);
+
+    // Glass panes sit behind the structural mullions.
+    for (let i = 0; i < 4; i++) {
+      const x = -3.2 + i * 2.13;
+      const pane = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.08, 4.65),
+        officeMaterials.glass
+      );
+      pane.name = "OfficeGlassPane_" + i;
+      pane.position.set(x, 2.4, -4.18);
+      officeRoot.add(pane);
+    }
+
+    for (let i = 0; i < 5; i++) {
+      const x = -4.25 + i * 2.125;
+      addOfficeBox(
+        "WindowVerticalFrame_" + i,
+        0.065, 4.75, 0.09,
+        x, 2.4, -4.08, officeMaterials.frame
+      );
+    }
+
+    addOfficeBox("WindowHorizontalFrame", 8.55, 0.055, 0.09, 0, 2.35, -4.08, officeMaterials.frame);
+
+    // A second architectural layer adds depth at the sides.
+    addOfficeBox("LeftInteriorWall", 2.0, 4.5, 0.28, -5.1, 2.0, -2.8, officeMaterials.wall);
+    addOfficeBox("RightInteriorWall", 2.0, 4.5, 0.28, 5.1, 2.0, -2.8, officeMaterials.wall);
+
+    // Layered city skyline outside the windows, with restrained lit windows.
+    const skyline = new THREE.Group();
+    skyline.name = "OfficeDistantCity";
+    officeRoot.add(skyline);
+
+    const buildings = [
+      [-4.0, 1.4, 0.55, 0.55], [-3.35, 2.0, 0.62, 0.6],
+      [-2.65, 1.1, 0.5, 0.55], [-2.0, 2.6, 0.72, 0.65],
+      [-1.2, 1.65, 0.58, 0.5], [-0.45, 2.25, 0.65, 0.65],
+      [0.35, 1.25, 0.5, 0.55], [1.0, 2.8, 0.7, 0.6],
+      [1.8, 1.8, 0.58, 0.6], [2.5, 2.35, 0.72, 0.65],
+      [3.3, 1.5, 0.6, 0.55], [4.0, 2.1, 0.62, 0.6]
+    ];
+
+    buildings.forEach((b, i) => {
+      const [x, height, width, depth] = b;
+      const building = new THREE.Mesh(
+        new THREE.BoxGeometry(width, height, depth),
+        officeMaterials.building[i % officeMaterials.building.length]
+      );
+      building.name = "CityTower_" + i;
+      building.position.set(x, 0.02 + height / 2, -6.1 - (i % 3) * 0.35);
+      skyline.add(building);
+
+      // Sparse glowing windows on the face toward Jurix.
+      const rows = Math.max(2, Math.floor(height * 3));
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < 2; col++) {
+          if ((i + row + col) % 3 === 0) continue;
+          const windowMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(0.055, 0.075),
+            officeMaterials.warm
+          );
+          windowMesh.position.set(
+            x - 0.11 + col * 0.22,
+            0.12 + row * 0.22,
+            building.position.z + depth / 2 + 0.006
+          );
+          skyline.add(windowMesh);
+        }
+      }
+    });
+
+    // JURIX_OFFICE_DETAILS_V1
+    // Sunset atmosphere behind the existing window and city geometry.
+    const skyCanvas = document.createElement("canvas");
+    skyCanvas.width = 512;
+    skyCanvas.height = 512;
+    const skyCtx = skyCanvas.getContext("2d");
+
+    if (skyCtx) {
+      const gradient = skyCtx.createLinearGradient(0, 0, 0, 512);
+      gradient.addColorStop(0, "#526d91");
+      gradient.addColorStop(0.42, "#e9a27d");
+      gradient.addColorStop(0.68, "#f5c7a0");
+      gradient.addColorStop(1, "#667d98");
+      skyCtx.fillStyle = gradient;
+      skyCtx.fillRect(0, 0, 512, 512);
+
+      // Soft, broad sunset glow rather than a hard sun disc.
+      const glow = skyCtx.createRadialGradient(330, 280, 8, 330, 280, 180);
+      glow.addColorStop(0, "rgba(255,230,190,0.85)");
+      glow.addColorStop(1, "rgba(255,190,150,0)");
+      skyCtx.fillStyle = glow;
+      skyCtx.fillRect(0, 0, 512, 512);
+    }
+
+    const skyTexture = new THREE.CanvasTexture(skyCanvas);
+    skyTexture.colorSpace = THREE.SRGBColorSpace;
+    const sunsetSky = new THREE.Mesh(
+      new THREE.PlaneGeometry(15, 7),
+      new THREE.MeshBasicMaterial({ map: skyTexture, depthWrite: false })
+    );
+    sunsetSky.name = "SunsetSkyBeyondWindows";
+    sunsetSky.position.set(0, 2.8, -7.4);
+    officeRoot.add(sunsetSky);
+
+    // Refined polished-stone floor with subtle architectural inlays.
+    (officeFloor.material as THREE.MeshStandardMaterial).roughness = 0.19;
+    (officeFloor.material as THREE.MeshStandardMaterial).metalness = 0.28;
+    officeFloor.material.needsUpdate = true;
+
+    const floorInlayMaterial = new THREE.MeshStandardMaterial({
+      color: 0xb78b67,
+      emissive: 0x4c2917,
+      emissiveIntensity: 0.32,
+      metalness: 0.55,
+      roughness: 0.25
+    });
+
+    addOfficeBox("FloorInlayLeft", 0.025, 0.008, 8.0, -3.5, -0.213, -1.2, floorInlayMaterial);
+    addOfficeBox("FloorInlayRight", 0.025, 0.008, 8.0, 3.5, -0.213, -1.2, floorInlayMaterial);
+    addOfficeBox("FloorInlayFront", 7.0, 0.008, 0.025, 0, -0.213, 1.2, floorInlayMaterial);
+
+    // Reception console at the far left, with a warm illuminated edge.
+    const consoleStone = new THREE.MeshStandardMaterial({
+      color: 0x292b30,
+      metalness: 0.32,
+      roughness: 0.24
+    });
+    const consoleTrim = new THREE.MeshStandardMaterial({
+      color: 0xf4c18b,
+      emissive: 0xe89a55,
+      emissiveIntensity: 1.15,
+      metalness: 0.25,
+      roughness: 0.3
+    });
+
+    addOfficeBox("ReceptionConsoleTop", 2.0, 0.12, 0.78, -3.0, 1.02, -0.15, consoleStone);
+    addOfficeBox("ReceptionConsoleFront", 1.95, 0.9, 0.12, -3.0, 0.53, -0.48, officeMaterials.wall);
+    addOfficeBox("ReceptionConsoleLightEdge", 1.94, 0.025, 0.025, -3.0, 0.94, -0.545, consoleTrim);
+
+    // Lounge sofa behind and to the right of Jurix.
+    const sofaBase = new THREE.MeshStandardMaterial({
+      color: 0x55515a,
+      roughness: 0.88
+    });
+    const sofaCushion = new THREE.MeshStandardMaterial({
+      color: 0x716873,
+      roughness: 0.92
+    });
+
+    addOfficeBox("LoungeSofaBase", 2.25, 0.35, 0.72, 2.35, 0.32, -2.65, sofaBase);
+    addOfficeBox("LoungeSofaBack", 2.25, 0.78, 0.22, 2.35, 0.76, -2.98, sofaBase);
+
+    for (let i = 0; i < 3; i++) {
+      addOfficeBox(
+        "SofaSeatCushion_" + i,
+        0.7, 0.13, 0.58,
+        1.62 + i * 0.73, 0.55, -2.58,
+        sofaCushion
+      );
+      addOfficeBox(
+        "SofaBackCushion_" + i,
+        0.66, 0.48, 0.12,
+        1.62 + i * 0.73, 0.88, -2.82,
+        sofaCushion
+      );
+    }
+
+    // Planters and stylized leaves: individual 3D objects with varied angles.
+    const planterMaterial = new THREE.MeshStandardMaterial({
+      color: 0x252b2a,
+      roughness: 0.42,
+      metalness: 0.18
+    });
+    const leafMaterial = new THREE.MeshStandardMaterial({
+      color: 0x35664f,
+      roughness: 0.78,
+      side: THREE.DoubleSide
+    });
+    const leafLightMaterial = new THREE.MeshStandardMaterial({
+      color: 0x5b8a62,
+      roughness: 0.82,
+      side: THREE.DoubleSide
+    });
+
+    const addPlant = (name: string, x: number, z: number, scale: number) => {
+      const plant = new THREE.Group();
+      plant.name = name;
+      plant.position.set(x, -0.2, z);
+      plant.scale.setScalar(scale);
+      officeRoot.add(plant);
+
+      const pot = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.17, 0.38, 12),
+        planterMaterial
+      );
+      pot.position.y = 0.19;
+      plant.add(pot);
+
+      for (let i = 0; i < 9; i++) {
+        const angle = (i / 9) * Math.PI * 2;
+        const leaf = new THREE.Mesh(
+          new THREE.SphereGeometry(0.12, 8, 6),
+          i % 2 === 0 ? leafMaterial : leafLightMaterial
+        );
+        leaf.scale.set(0.58, 2.0 + (i % 3) * 0.3, 0.32);
+        leaf.position.set(
+          Math.cos(angle) * (0.12 + (i % 2) * 0.05),
+          0.62 + (i % 3) * 0.08,
+          Math.sin(angle) * (0.12 + (i % 2) * 0.05)
+        );
+        leaf.rotation.z = Math.cos(angle) * 0.38;
+        leaf.rotation.y = angle;
+        plant.add(leaf);
+      }
+      return plant;
+    };
+
+    addPlant("LeftReceptionPlant", -4.05, -0.55, 1.25);
+    addPlant("RightLoungePlant", 4.0, -1.1, 1.45);
+
+    // Warm shelf cubbies on the left interior wall.
+    const shelfMaterial = new THREE.MeshStandardMaterial({
+      color: 0x171c23,
+      roughness: 0.5,
+      metalness: 0.25
+    });
+
+    addOfficeBox("DisplayShelfLeft", 1.0, 2.6, 0.28, -5.0, 2.15, -2.45, shelfMaterial);
+
+    for (let row = 0; row < 4; row++) {
+      const shelfY = 1.15 + row * 0.62;
+      addOfficeBox(
+        "DisplayShelfBoard_" + row,
+        0.92, 0.045, 0.36,
+        -5.0, shelfY, -2.23,
+        officeMaterials.frame
+      );
+      addOfficeBox(
+        "DisplayShelfGlow_" + row,
+        0.82, 0.018, 0.018,
+        -5.0, shelfY + 0.04, -2.04,
+        consoleTrim
+      );
+    }
+
+    const shelfLight = new THREE.PointLight(0xffbd83, 1.5, 5);
+    shelfLight.position.set(-4.8, 2.6, -1.9);
+    officeRoot.add(shelfLight);
+    // Executive desk positioned well to the left of Jurix.
+    addOfficeBox("ExecutiveDeskTop", 1.65, 0.1, 0.72, -2.05, 1.0, -0.75, officeMaterials.desk);
+    addOfficeBox("ExecutiveDeskLegLeft", 0.09, 0.95, 0.62, -2.68, 0.49, -0.75, officeMaterials.frame);
+    addOfficeBox("ExecutiveDeskLegRight", 0.09, 0.95, 0.62, -1.42, 0.49, -0.75, officeMaterials.frame);
+
+    // Warm architectural light strips on the side piers.
+    addOfficeBox("LeftWarmLightStrip", 0.035, 3.5, 0.025, -4.11, 2.25, -3.9, officeMaterials.warm);
+    addOfficeBox("RightWarmLightStrip", 0.035, 3.5, 0.025, 4.11, 2.25, -3.9, officeMaterials.warm);
+
+    const officeWarmLight = new THREE.PointLight(0xffd2a1, 2.0, 12);
+    officeWarmLight.position.set(-2.4, 3.0, 1.0);
+    officeRoot.add(officeWarmLight);
+
+    const officeFillLight = new THREE.PointLight(0xb6dcff, 1.1, 14);
+    officeFillLight.position.set(2.5, 2.8, -1.0);
+    officeRoot.add(officeFillLight);
+
+
+    const fbxLoader = new FBXLoader();
+
+    const playMode = (requestedMode: JurixAvatarMode, duration = 0.35) => {
+      // The app calls the speaking state "speaking"; the downloaded clip is "talking".
+      const actionName = requestedMode === "speaking" ? "talking" : requestedMode;
+      const next = actions[actionName];
+      if (!next || activeAction === next) return;
+
+      if (activeAction) activeAction.crossFadeTo(next, duration, true);
+      next.reset().fadeIn(duration).play();
+      activeAction = next;
+      console.log("JURIX MODE:", requestedMode, "->", actionName);
+    };
+    playModeRef.current = (requestedMode) => playMode(requestedMode);
+
+    fbxLoader.load(
+      "/models/jurix_original_rigged_v1.fbx",
+      (model) => {
+        if (disposed) return;
+
+        model.name = "JurixOriginalRigged";
+        model.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          materials.forEach((material) => {
+            if (material instanceof THREE.MeshStandardMaterial) {
+              material.roughness = Math.max(material.roughness, 0.58);
+              material.metalness = Math.min(material.metalness, 0.08);
+              material.needsUpdate = true;
+            }
+          });
+          const skinned = obj as THREE.SkinnedMesh;
+          if (skinned.isSkinnedMesh) {
+            console.log("JURIX RIG BONES:", skinned.skeleton.bones.map((bone) => bone.name));
+          }
+        });
+
+        // Normalize the master FBX to the same on-screen height used by the previous model.
+        model.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const scale = 1.8 / (size.y || 1);
+        model.scale.setScalar(scale);
+        model.position.set(-center.x * scale, -box.min.y * scale - 0.2, -center.z * scale);
+        scene.add(model);
+
+        mixer = new THREE.AnimationMixer(model);
+
+        const animationFiles = [
+          { name: "idle", file: "/models/jurix_idle_v1.fbx", loop: THREE.LoopRepeat },
+          { name: "greeting", file: "/models/jurix_greeting_v1.fbx", loop: THREE.LoopOnce },
+          { name: "listening", file: "/models/jurix_listening_v1.fbx", loop: THREE.LoopRepeat },
+          { name: "talking", file: "/models/jurix_talking_v1.fbx", loop: THREE.LoopRepeat },
+        ] as const;
+
+        mixer.addEventListener("finished", (event) => {
+          if (event.action === actions.greeting && !disposed) {
+            playMode("idle");
+          }
+        });
+
+        animationFiles.forEach(({ name, file, loop }) => {
+          fbxLoader.load(
+            file,
+            (animationFbx) => {
+              if (disposed || !mixer) return;
+              if (animationFbx.animations.length === 0) {
+                console.error("No animation clip found in:", file);
+                return;
+              }
+
+              const clip = animationFbx.animations[0].clone();
+              const action = mixer.clipAction(clip);
+              action.setLoop(loop, loop === THREE.LoopOnce ? 1 : Infinity);
+              if (loop === THREE.LoopOnce) action.clampWhenFinished = false;
+              actions[name] = action;
+              console.log("JURIX ANIMATION LOADED:", name, clip.name, "tracks:", clip.tracks.length);
+
+              if (name === "idle" || modeRef.current === name || (modeRef.current === "speaking" && name === "talking")) {
+                playMode(modeRef.current);
+              }
+            },
+            undefined,
+            (error) => console.error("Failed to load Jurix animation:", file, error)
+          );
+        });
+      },
+      undefined,
+      (error) => console.error("Failed to load new rigged Jurix FBX:", error)
+    );
+
+    let lastFrameTime = 0;
+    const frameInterval = 1000 / 30;
+
+    const animate = (timestamp: number) => {
+      if (disposed) return;
+      animId = requestAnimationFrame(animate);
+
+      if (timestamp - lastFrameTime < frameInterval) return;
+
+      const delta = Math.min(clock.getDelta(), 0.05);
+      lastFrameTime = timestamp;
+      mixer?.update(delta);
+      renderer.render(scene, camera);
+    };
+    animId = requestAnimationFrame(animate);
+
+    const handleResize = () => {
+      const w = container.clientWidth || window.innerWidth;
+      const h = container.clientHeight || window.innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    };
+
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener("resize", handleResize);
+      cancelAnimationFrame(animId);
+      mixer?.stopAllAction();
+      renderer.dispose();
+      renderer.domElement.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+      playModeRef.current(mode);
+  }, [mode]);
+
+  return (
+    <div className="relative w-full h-full flex items-center justify-center pointer-events-none">
+      <div ref={mountRef} className="w-full h-full pointer-events-auto" />
+    </div>
+  );
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

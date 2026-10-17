@@ -1,0 +1,191 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jurix Model Compatibility Check</title>
+<style>
+  body { margin:0; background:#10141c; color:#f3f5fa; font:14px Arial,sans-serif; }
+  header { padding:16px 20px; background:#1c2430; }
+  h1 { font-size:20px; margin:0 0 8px; }
+  #status { color:#a8d8ff; white-space:pre-wrap; line-height:1.5; }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; }
+  section { min-width:0; background:#202936; border-radius:8px; overflow:hidden; }
+  h2 { font-size:15px; padding:12px; margin:0; }
+  .view { height:65vh; min-height:380px; position:relative; }
+  canvas { display:block; width:100%; height:100%; }
+  .label { padding:10px 12px; color:#cbd5e1; white-space:pre-wrap; overflow-wrap:anywhere; }
+  @media(max-width:800px) { main { grid-template-columns:1fr; } .view { height:55vh; } }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.186.1/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.186.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<header>
+  <h1>Jurix appearance and animation compatibility</h1>
+  <div id="status">Loading both models. The first load may take a little time.</div>
+</header>
+<main>
+  <section>
+    <h2>LEFT — Current Jurix GLB</h2>
+    <div class="view" id="left"></div>
+    <div class="label" id="leftInfo">Loading GLB…</div>
+  </section>
+  <section>
+    <h2>RIGHT — Mixamo-rigged FBX</h2>
+    <div class="view" id="right"></div>
+    <div class="label" id="rightInfo">Loading FBX…</div>
+  </section>
+</main>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+
+const status = document.getElementById("status");
+const report = [];
+const writeStatus = () => status.textContent = report.join("\n");
+
+function inspect(root) {
+  let meshes = 0, skinned = 0, bones = 0, materials = 0;
+  root.traverse(o => {
+    if (o.isMesh) {
+      meshes++;
+      const list = Array.isArray(o.material) ? o.material : [o.material];
+      materials += list.filter(Boolean).length;
+    }
+    if (o.isSkinnedMesh) skinned++;
+    if (o.isBone) bones++;
+  });
+  return { meshes, skinned, bones, materials };
+}
+
+function makeViewer(containerId, root, title) {
+  const container = document.getElementById(containerId);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x303947);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8c8490, 2.2));
+
+  const key = new THREE.DirectionalLight(0xffffff, 3);
+  key.position.set(3, 6, 5);
+  scene.add(key);
+
+  const renderer = new THREE.WebGLRenderer({ antialias:true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  container.appendChild(renderer.domElement);
+
+  const camera = new THREE.PerspectiveCamera(32, 1, 0.01, 1000);
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+
+  root.position.x -= center.x;
+  root.position.y -= box.min.y;
+  root.position.z -= center.z;
+
+  const distance = maxDim * 2.6;
+  camera.position.set(distance * 0.18, maxDim * 0.52, distance);
+  camera.lookAt(0, maxDim * 0.48, 0);
+
+  scene.add(root);
+
+  const floor = new THREE.GridHelper(maxDim * 2, 20, 0x758397, 0x4a5667);
+  floor.position.y = 0;
+  scene.add(floor);
+
+  const resize = () => {
+    const w = container.clientWidth || 400;
+    const h = container.clientHeight || 500;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  };
+  resize();
+  window.addEventListener("resize", resize);
+
+  return {
+    scene, camera, renderer, root,
+    info: `${title}\nHeight: ${size.y.toFixed(3)}\nWidth: ${size.x.toFixed(3)}\nDepth: ${size.z.toFixed(3)}`
+  };
+}
+
+const viewers = [];
+const mixers = [];
+const clock = new THREE.Clock();
+
+try {
+  report.push("Loading current Jurix GLB…");
+  writeStatus();
+
+  const gltf = await new GLTFLoader().loadAsync("/models/jurix_v3_color.glb");
+  const glbRoot = gltf.scene;
+  const glbStats = inspect(glbRoot);
+  const glbViewer = makeViewer("left", glbRoot, "GLB model");
+  viewers.push(glbViewer);
+
+  document.getElementById("leftInfo").textContent =
+    glbViewer.info +
+    `\nMeshes: ${glbStats.meshes}` +
+    `\nSkinned meshes: ${glbStats.skinned}` +
+    `\nBones: ${glbStats.bones}` +
+    `\nMaterials: ${glbStats.materials}` +
+    `\nEmbedded animations: ${gltf.animations.length}`;
+
+  report.push(`GLB loaded. Embedded animations: ${gltf.animations.length}.`);
+  writeStatus();
+
+  report.push("Loading Mixamo-rigged FBX…");
+  writeStatus();
+
+  const fbx = await new FBXLoader().loadAsync("/models/jurix_v3_mixamo_rigged.fbx");
+  const fbxStats = inspect(fbx);
+  const fbxViewer = makeViewer("right", fbx, "Mixamo-rigged FBX");
+  viewers.push(fbxViewer);
+
+  document.getElementById("rightInfo").textContent =
+    fbxViewer.info +
+    `\nMeshes: ${fbxStats.meshes}` +
+    `\nSkinned meshes: ${fbxStats.skinned}` +
+    `\nBones: ${fbxStats.bones}` +
+    `\nMaterials: ${fbxStats.materials}` +
+    `\nAnimations: ${fbx.animations.length}` +
+    `\nClips: ${fbx.animations.map(a => a.name || "(unnamed)").join(", ") || "none"}`;
+
+  if (fbx.animations.length) {
+    const mixer = new THREE.AnimationMixer(fbx);
+    mixers.push(mixer);
+    const action = mixer.clipAction(fbx.animations[0]);
+    action.play();
+  }
+
+  report.push(`FBX loaded. Meshes: ${fbxStats.meshes}; bones: ${fbxStats.bones}; clips: ${fbx.animations.length}.`);
+  report.push("Compare the character's face, hair, clothes, and body on both sides.");
+  report.push("The FBX animation plays on the right if an animation is embedded.");
+  writeStatus();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const delta = Math.min(clock.getDelta(), 0.05);
+    for (const mixer of mixers) mixer.update(delta);
+    for (const viewer of viewers) viewer.renderer.render(viewer.scene, viewer.camera);
+  }
+  animate();
+
+} catch (error) {
+  console.error(error);
+  report.push("CHECK FAILED: " + (error?.message || String(error)));
+  report.push("If the error mentions network access, check internet connectivity and reload.");
+  report.push("If a model returns 404, verify the filename in public\\models.");
+  writeStatus();
+}
+</script>
+</body>
+</html>

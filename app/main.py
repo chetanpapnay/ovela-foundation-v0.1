@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hmac
 import os
@@ -15,6 +15,8 @@ from .http.api import ApiConfig, OvelaApi
 from .ledger import AppendOnlyLedger, LedgerConflict
 from .models import ActionRequest, FinancialEvent
 from .runtime import OvelaRuntime
+from .ingest_router import register_ingest_endpoints
+from .supabase_client import fetch_recent_transactions, fetch_account_summary
 
 
 APP_VERSION = "0.1.1"
@@ -324,6 +326,21 @@ def create_application(
         config=api_config,
     )
 
+    @app_instance.get("/api/transactions")
+    def get_live_transactions(limit: int = 50) -> Any:
+        try:
+            return fetch_recent_transactions(limit=limit)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app_instance.get("/api/summary")
+    def get_live_summary() -> Any:
+        try:
+            return fetch_account_summary()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    register_ingest_endpoints(app_instance, ledger)
     app_instance.mount("/v1", ovela_api)
 
     return app_instance

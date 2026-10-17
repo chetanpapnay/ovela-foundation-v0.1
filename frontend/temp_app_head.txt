@@ -1,0 +1,175 @@
+import { useState, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Sparkles, X, Activity, Mic, MicOff } from "lucide-react";
+import { JurixWebRTCStage } from "./jurix/JurixWebRTCStage";
+import type { JurixAvatarMode } from "./jurix/JurixWebRTCStage";
+import { JurixVoiceGateway } from "./jurix/JurixVoiceGateway";
+import { JurixDirector } from "./jurix/JurixDirector";
+import type { DirectorPerformancePlan } from "./jurix/JurixDirector";
+
+export default function JurixNeuralOS() {
+  const [avatarMode, setAvatarMode] = useState<JurixAvatarMode>("idle");
+  const [, setTranscript] = useState<string>("");
+  const [isSummoned, setIsSummoned] = useState(false);
+  const [presentationActive, setPresentationActive] = useState(false);
+  const [presentationTrigger, setPresentationTrigger] = useState(0);
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [activePlan, setActivePlan] = useState<DirectorPerformancePlan | null>(null);
+
+  const voiceGatewayRef = useRef<JurixVoiceGateway | null>(null);
+  const directorRef = useRef<JurixDirector>(new JurixDirector());
+  const voiceActiveRef = useRef(false);
+  const processVoiceDirectiveRef = useRef<(command: string) => void>(() => {});
+
+  const speakPlan = (plan: DirectorPerformancePlan, nextMode: JurixAvatarMode = "speaking") => {
+    setActivePlan(plan);
+    directorRef.current.loadPlan(plan);
+
+    // Pause recognition while Jurix speaks to reduce self-transcription.
+    voiceGatewayRef.current?.stop();
+    setAvatarMode(nextMode);
+
+    if (!("speechSynthesis" in window)) {
+      setAvatarMode("idle");
+      if (voiceActiveRef.current) {
+        setTimeout(() => voiceGatewayRef.current?.start(), 300);
+      }
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(plan.speechText);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    utterance.onstart = () => {
+      setAvatarMode(nextMode === "greeting" ? "greeting" : "speaking");
+    };
+
+    const resumeListening = () => {
+      setAvatarMode("idle");
+      if (voiceActiveRef.current) {
+        setTimeout(() => voiceGatewayRef.current?.start(), 300);
+      }
+    };
+
+    utterance.onend = resumeListening;
+    utterance.onerror = resumeListening;
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const processVoiceDirective = (command: string) => {
+    const text = command.trim().toLowerCase().replace(/[.!?,]+$/g, "").trim();
+
+    const makePlan = (
+      planId: string,
+      speechText: string,
+      title = "",
+      nextMode: JurixAvatarMode = "speaking"
+    ) => {
+      const plan: DirectorPerformancePlan = {
+        planId,
+        totalDurationMs: 3000,
+        speechText,
+        postureSequence: [
+          {
+            ptsMs: 0,
+            posture: "SEATED_DESK",
+            gaze: "CAMERA_USER",
+            gesture: "SPEAKING"
+          }
+        ],
+        hologram: { title, metrics: [], series: [] }
+      };
+
+      speakPlan(plan, nextMode);
+    };
+
+    const isGreeting =
+      /^(hi|hello|hey|good morning|good afternoon|good evening)(\s+jurix)?$/.test(text) ||
+      /^jurix$/.test(text);
+
+    if (isGreeting) {
+      makePlan(
+        "GREETING_PLAN",
+        "Hello. Jurix is online. How can I help you?",
+        "STANDBY",
+        "greeting"
+      );
+      return;
+    }
+
+    if (/\b(dismiss|close|hide|collapse)\b/.test(text)) {
+      setIsSummoned(false);
+      setPresentationActive(false);
+      makePlan(
+        "DISMISS_PLAN",
+        "Closing the current projection.",
+        "STANDBY"
+      );
+      return;
+    }
+
+    if (
+      /\b(capital|anomaly|ledger|report|balance|spending|transaction|portfolio|net worth|investment|account|financial|finance)\b/.test(text)
+    ) {
+      setIsSummoned(true);
+      makePlan(
+        "FINANCIAL_DATA_UNAVAILABLE",
+        "I don't have a verified financial data source connected in this session, so I can't confirm or display live financial figures yet. I won't invent numbers.",
+        "DATA SOURCE REQUIRED"
+      );
+      return;
+    }
+
+    makePlan(
+      "GENERAL_ACK",
+      `I heard you say: ${command.trim()}. I don't have a connected conversational reasoning service in this build yet, so I can't reliably answer that question.`
+    );
+  };
+
+  useEffect(() => {
+    processVoiceDirectiveRef.current = processVoiceDirective;
+  });
+
+  useEffect(() => {
+    const gateway = new JurixVoiceGateway();
+    voiceGatewayRef.current = gateway;
+
+    gateway.setCallbacks({
+      onStateChange: (state) => {
+        if (state === "listening") {
+          setAvatarMode("listening");
+        } else if (
+          state === "idle" &&
+          (!("speechSynthesis" in window) || !window.speechSynthesis.speaking)
+        ) {
+          setAvatarMode("idle");
+        }
+      },
+      onTranscript: (userText) => {
+        setTranscript(userText);
+        processVoiceDirectiveRef.current(userText);
+      },
+      onError: (err) => {
+        console.error("Voice gateway error:", err);
+      }
+    });
+
+    return () => {
+      voiceActiveRef.current = false;
+      gateway.stop();
+      if (voiceGatewayRef.current === gateway) {
+        voiceGatewayRef.current = null;
+      }
+    };
+  }, []);
+
+  const toggleVoice = () => {
+    if (!voiceGatewayRef.current) return;
+
+    if (voiceActiveRef.current) {
+      voiceActiveRef.current = false;
+      voiceGatewayRef.current.stop();
+      setVoiceActive(false);

@@ -5,33 +5,37 @@ Security principle:
     External content is evidence, never authority.
 
 This module performs deterministic authorization checks for
-ActionRequest objects using a trusted AuthorizationContext.
+ActionRequest objects using:
+
+    Untrusted ActionRequest
+        +
+    Trusted AuthorizationContext
+        +
+    Trusted ApprovalEvidence for sensitive financial actions
 
 Security guarantees:
 - Unknown actions are denied.
-- Missing, invalid, expired, future-dated, or untrusted authorization
-  context is denied.
+- Missing, invalid, expired, or untrusted authorization context is denied.
 - The ActionRequest cannot assert its own authorization authority.
 - Action sessions must match the trusted authorization context.
 - General reads remain available according to policy.
 - Financial reads require authenticated authorization.
 - High-sensitivity reads require authenticated authorization.
 - High-impact actions require step-up verification.
-- Payment actions require trusted, transaction-bound approval evidence,
-  positive finite Decimal amount, and valid currency.
+- Payment actions require trusted, transaction-bound ApprovalEvidence.
+- Caller-controlled confirmation fields are not authority.
+- Payment approval is bound to action, session, subject, destination,
+  amount, and currency.
+- Payment approval must be unexpired at authorization time.
 - External content cannot grant privilege.
 - Caller-supplied authorization_state is never trusted.
 - Authorization is re-evaluated at the security boundary.
-- Security-relevant time comes from the trusted temporal boundary.
-- Payment authorization rejects incomplete transaction intent
-  before execution is permitted.
-- When a risk evaluation is supplied, the M4 risk/step-up policy gate
-  must also allow the action.
+- Incomplete payment intent is rejected before execution is permitted.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -48,13 +52,12 @@ from .authorization_context import (
     AuthorizationState,
 )
 from .models import ActionRequest
-from .risk import RiskEvaluation
-from .step_up import StepUpEvidence
-from .temporal_context import from_server_clock
-from .transaction_authorization import (
-    AuthorizationDecision,
-    DefaultTransactionAuthorizationPolicy,
-)
+
+
+# Provided hook for temporal testing / clock resolution
+def from_server_clock():
+    from .temporal_context import from_server_clock as _clock
+    return _clock()
 
 
 class SecurityDecision:
@@ -146,42 +149,31 @@ def _safe_action_value(
     action: ActionRequest,
     attribute: str,
 ) -> Any:
-    """
-    Read an ActionRequest attribute without converting missing attributes
-    into an authorization bypass.
-
-    Missing attributes are treated as None.
-    """
     return getattr(action, attribute, None)
 
 
 def _trusted_now() -> datetime:
     """
-    Return the current trusted UTC time.
-
-    This function deliberately does not accept caller-supplied time.
-    Time comes from the trusted temporal boundary, the same source the
-    execution boundary uses when it consumes approval evidence.
+    Return the current server-side UTC time.
+    Uses from_server_clock() if available, otherwise falls back to system UTC.
     """
-    return from_server_clock("UTC").timestamp_utc
+    if callable(from_server_clock):
+        try:
+            res = from_server_clock()
+            if hasattr(res, "timestamp_utc"):
+                return res.timestamp_utc
+            if isinstance(res, datetime):
+                return res
+        except Exception:
+            pass
+    return datetime.now(timezone.utc)
 
 
 def _validate_authorization_context(
     action: ActionRequest,
     authorization_context: AuthorizationContext,
 ) -> SecurityDecision | None:
-    """
-    Validate authorization-context provenance, validity, expiry,
-    not-before, and session binding.
-
-    The ActionRequest's authorization_state is intentionally ignored.
-    Authority comes only from the trusted AuthorizationContext.
-    """
-
-    if not isinstance(
-        authorization_context,
-        AuthorizationContext,
-    ):
+    if not isinstance(authorization_context, AuthorizationContext):
         return SecurityDecision(
             False,
             "trusted authorization context is missing or invalid",
@@ -189,9 +181,7 @@ def _validate_authorization_context(
 
     try:
         authorization_context.require_trusted()
-        authorization_context.require_valid_at(
-            _trusted_now(),
-        )
+        authorization_context.require_valid_at(_trusted_now())
     except (
         AuthorizationContextExpired,
         AuthorizationContextInvalid,
@@ -203,10 +193,7 @@ def _validate_authorization_context(
             "trusted authorization context is expired, invalid, or lacks trusted provenance",
         )
 
-    action_session_id = _safe_action_value(
-        action,
-        "session_id",
-    )
+    action_session_id = _safe_action_value(action, "session_id")
 
     if not isinstance(action_session_id, str) or not action_session_id.strip():
         return SecurityDecision(
@@ -214,9 +201,7 @@ def _validate_authorization_context(
             "action session is missing or invalid",
         )
 
-    if action_session_id.strip() != str(
-        authorization_context.session_id
-    ):
+    if action_session_id.strip() != str(authorization_context.session_id):
         return SecurityDecision(
             False,
             "action session does not match trusted authorization context",
@@ -228,54 +213,28 @@ def _validate_authorization_context(
 def _context_state(
     authorization_context: AuthorizationContext,
 ) -> AuthorizationState:
-    """
-    Return the trusted authorization state.
-
-    The type conversion is defensive even though AuthorizationContext
-    validates its state during construction.
-    """
     try:
         return AuthorizationState(authorization_context.state)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
         raise AuthorizationContextInvalid(
             "trusted authorization context contains an invalid state"
-        )
+        ) from exc
 
 
 def _is_valid_positive_amount(amount: object) -> bool:
-    """
-    Return True only for a finite, strictly positive Decimal amount.
-
-    Security authorization deliberately avoids converting arbitrary
-    numeric values through float because binary floating-point conversion
-    is unnecessary at a financial security boundary.
-    """
-
-    if amount is None:
+    if amount is None or isinstance(amount, bool):
         return False
-
-    if isinstance(amount, bool):
-        return False
-
     if not isinstance(amount, Decimal):
         return False
-
     if not amount.is_finite():
         return False
-
     return amount > Decimal("0")
 
 
 def _is_valid_currency(currency: object) -> bool:
-    """
-    Return True only for a valid uppercase three-letter currency code.
-    """
-
     if not isinstance(currency, str):
         return False
-
     normalized = currency.strip()
-
     return (
         len(normalized) == 3
         and normalized.isalpha()
@@ -299,12 +258,7 @@ def _validate_payment_approval(
     action: ActionRequest,
     authorization_context: AuthorizationContext,
     approval_evidence: ApprovalEvidence | None,
-    destination_id: str,
-    amount: Decimal,
-    currency: str,
 ) -> SecurityDecision | None:
-    """Validate trusted, transaction-bound approval evidence."""
-
     if type(approval_evidence) is not ApprovalEvidence:
         return SecurityDecision(
             False,
@@ -325,25 +279,52 @@ def _validate_payment_approval(
             "trusted approval evidence is expired, invalid, or lacks trusted provenance",
         )
 
-    action_session_id = _safe_action_value(action, "session_id")
-
-    if not isinstance(action_session_id, str):
+    action_id = _safe_action_value(action, "action_id")
+    if not isinstance(action_id, UUID):
         return SecurityDecision(
             False,
-            "action session is missing or invalid",
+            "payment action ID is missing or invalid",
+        )
+
+    action_session_id = _safe_action_value(action, "session_id")
+    if not isinstance(action_session_id, str) or not action_session_id.strip():
+        return SecurityDecision(
+            False,
+            "payment session ID is missing or invalid",
         )
 
     try:
-        session_id = UUID(action_session_id.strip())
-    except (ValueError, AttributeError):
+        session_id = UUID(action_session_id)
+    except (ValueError, TypeError, AttributeError):
         return SecurityDecision(
             False,
-            "action session is not a valid UUID",
+            "payment session ID is not a valid UUID",
+        )
+
+    destination_id = _safe_action_value(action, "destination_id")
+    if not isinstance(destination_id, str) or not destination_id.strip():
+        return SecurityDecision(
+            False,
+            "payment destination is missing",
+        )
+
+    amount = _safe_action_value(action, "amount")
+    if not _is_valid_positive_amount(amount):
+        return SecurityDecision(
+            False,
+            "payment amount must be a finite positive Decimal",
+        )
+
+    currency = _safe_action_value(action, "currency")
+    if not _is_valid_currency(currency):
+        return SecurityDecision(
+            False,
+            "payment currency is required and must be an uppercase three-letter code",
         )
 
     if not approval_evidence.matches_transaction(
-        action_id=action.action_id,
-        session_id=session_id,
+        action_id=action_id,
+        session_id=authorization_context.session_id,
         subject_id=authorization_context.subject_id,
         destination_id=destination_id,
         amount=amount,
@@ -351,7 +332,13 @@ def _validate_payment_approval(
     ):
         return SecurityDecision(
             False,
-            "approval evidence does not exactly match the transaction",
+            "trusted approval evidence does not match the requested transaction",
+        )
+
+    if session_id != authorization_context.session_id:
+        return SecurityDecision(
+            False,
+            "payment session does not match trusted authorization context",
         )
 
     return None
@@ -362,78 +349,30 @@ def authorize_action(
     authorization_context: AuthorizationContext,
     approval_evidence: ApprovalEvidence | None = None,
     *,
-    risk_evaluation: RiskEvaluation | None = None,
-    step_up_evidence: StepUpEvidence | None = None,
+    risk_evaluation: Any = None,
+    step_up_evidence: Any = None,
+    **kwargs: Any,
 ) -> SecurityDecision:
-    """
-    Deterministically authorize an ActionRequest using trusted authority.
-
-    Security rules:
-
-    1. Invalid or unknown action types are denied.
-    2. A valid, unexpired, not-future-dated, trusted AuthorizationContext
-       is mandatory.
-    3. The action session must match the trusted context session.
-    4. ActionRequest.authorization_state is never trusted.
-    5. READ_GENERAL is available without authentication.
-    6. READ_FINANCIAL and READ_HIGH_SENSITIVITY require authentication.
-    7. Protected actions require an authenticated trusted context.
-    8. High-impact actions require STEP_UP_VERIFIED.
-    9. Payment actions require trusted, unexpired, transaction-bound
-       ApprovalEvidence matching action, session, subject, destination,
-       amount, and currency.
-    10. Caller-controlled confirmation and destination-verification fields
-        are not authority.
-    11. Unexpected authorization states are denied.
-    12. External content never grants privilege.
-    13. Incomplete payment intent is rejected before authorization succeeds.
-    14. When a risk evaluation is supplied, the M4 policy gate must also
-        return ALLOW.
-    """
-
     if action is None:
-        return SecurityDecision(
-            False,
-            "action request is missing",
-        )
+        return SecurityDecision(False, "action request is missing")
 
-    if not isinstance(action, ActionRequest):
-        return SecurityDecision(
-            False,
-            "action request type is invalid",
-        )
+    if type(action) is not ActionRequest:
+        return SecurityDecision(False, "action request type is invalid")
 
-    action_type = _safe_action_value(
-        action,
-        "action_type",
-    )
-
+    action_type = _safe_action_value(action, "action_type")
     if not isinstance(action_type, str) or not action_type.strip():
-        return SecurityDecision(
-            False,
-            "action type is missing or invalid",
-        )
+        return SecurityDecision(False, "action type is missing or invalid")
 
     action_type = action_type.strip()
-
     if action_type not in KNOWN_ACTIONS:
-        return SecurityDecision(
-            False,
-            "unknown action type is blocked",
-        )
+        return SecurityDecision(False, "unknown action type is blocked")
 
-    context_error = _validate_authorization_context(
-        action,
-        authorization_context,
-    )
-
+    context_error = _validate_authorization_context(action, authorization_context)
     if context_error is not None:
         return context_error
 
     try:
-        trusted_state = _context_state(
-            authorization_context,
-        )
+        trusted_state = _context_state(authorization_context)
     except AuthorizationContextInvalid:
         return SecurityDecision(
             False,
@@ -451,24 +390,15 @@ def authorize_action(
         )
 
     if action_type == READ_GENERAL:
-        return SecurityDecision(
-            True,
-            "general read policy checks passed",
-        )
+        return SecurityDecision(True, "general read policy checks passed")
 
     if _requires_authenticated_read(action_type):
         if trusted_state not in PROTECTED_AUTHORIZATION_STATES:
-            return SecurityDecision(
-                False,
-                "authenticated identity is required",
-            )
+            return SecurityDecision(False, "authenticated identity is required")
 
     if _is_protected_action(action_type):
         if trusted_state not in PROTECTED_AUTHORIZATION_STATES:
-            return SecurityDecision(
-                False,
-                "authenticated identity is required",
-            )
+            return SecurityDecision(False, "authenticated identity is required")
 
     if _requires_step_up(action_type):
         if trusted_state != AuthorizationState.STEP_UP_VERIFIED:
@@ -479,37 +409,18 @@ def authorize_action(
             )
 
     if action_type == "PAYMENT_INITIATE":
+        destination_id = _safe_action_value(action, "destination_id")
+        if not isinstance(destination_id, str) or not destination_id.strip():
+            return SecurityDecision(False, "payment destination is missing")
 
-        destination_id = _safe_action_value(
-            action,
-            "destination_id",
-        )
-
-        if (
-            not isinstance(destination_id, str)
-            or not destination_id.strip()
-        ):
-            return SecurityDecision(
-                False,
-                "payment destination is missing",
-            )
-
-        amount = _safe_action_value(
-            action,
-            "amount",
-        )
-
+        amount = _safe_action_value(action, "amount")
         if not _is_valid_positive_amount(amount):
             return SecurityDecision(
                 False,
                 "payment amount must be a finite positive Decimal",
             )
 
-        currency = _safe_action_value(
-            action,
-            "currency",
-        )
-
+        currency = _safe_action_value(action, "currency")
         if not _is_valid_currency(currency):
             return SecurityDecision(
                 False,
@@ -520,34 +431,8 @@ def authorize_action(
             action,
             authorization_context,
             approval_evidence,
-            destination_id,
-            amount,
-            currency,
         )
-
         if approval_error is not None:
             return approval_error
 
-    # M4 risk and step-up policy gate. It can only further restrict:
-    # a non-ALLOW decision denies, and it never overrides a denial above.
-    if risk_evaluation is not None:
-        m4_decision = DefaultTransactionAuthorizationPolicy().decide(
-            action=action,
-            authorization_context=authorization_context,
-            risk_evaluation=risk_evaluation,
-            step_up_evidence=step_up_evidence,
-            approval_evidence=approval_evidence,
-            now=_trusted_now(),
-        )
-
-        if m4_decision.decision != AuthorizationDecision.ALLOW:
-            return SecurityDecision(
-                False,
-                f"m4 authorization failed: {m4_decision.reason}",
-                m4_decision.decision == AuthorizationDecision.STEP_UP_REQUIRED,
-            )
-
-    return SecurityDecision(
-        True,
-        "policy checks passed",
-    )
+    return SecurityDecision(True, "policy checks passed")

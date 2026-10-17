@@ -1,1336 +1,557 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useState, useRef, useEffect, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Mic, MicOff, Sparkles, Activity, X, Send } from "lucide-react";
+import { JurixWebRTCStage } from "./jurix/JurixWebRTCStage";
+import type { JurixAvatarMode } from "./jurix/JurixWebRTCStage";
+import { JurixVoiceGateway } from "./jurix/JurixVoiceGateway";
+import { JurixDirector } from "./jurix/JurixDirector";
+import type { DirectorPerformancePlan } from "./jurix/JurixDirector";
 
-type PresenceMode = "idle" | "listening" | "thinking" | "speaking";
-type WorkspaceMode = "none" | "financial" | "legal" | "security";
+interface LedgerSummary {
+  total_expense: number;
+  cash_expense: number;
+  bank_expense: number;
+  daily_cap: number;
+  remaining_budget: number;
+  transaction_count: number;
+}
 
-type Message = {
-  id: number;
-  role: "user" | "jurix";
-  text: string;
+const DEFAULT_SUMMARY: LedgerSummary = {
+  total_expense: 0,
+  cash_expense: 0,
+  bank_expense: 0,
+  daily_cap: 4000,
+  remaining_budget: 4000,
+  transaction_count: 0,
 };
 
-const INITIAL_MESSAGES: Message[] = [
-  {
-    id: 1,
-    role: "jurix",
-    text: "I’m here. Tell me what you want to understand, check, or investigate.",
-  },
-];
-
-const styles = `
-:root {
-  color-scheme: dark;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", sans-serif;
-  background: #050606;
-  color: #eeeae2;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  width: 100%;
-  min-width: 320px;
-  min-height: 100%;
-  margin: 0;
-}
-
-body {
-  min-height: 100vh;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 50% 42%, rgba(116, 92, 55, 0.08), transparent 31%),
-    radial-gradient(circle at 72% 65%, rgba(255, 255, 255, 0.025), transparent 32%),
-    #050606;
-}
-
-button,
-input,
-textarea {
-  font: inherit;
-}
-
-button {
-  border: 0;
-}
-
-.app {
-  position: relative;
-  min-height: 100vh;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 50% 43%, rgba(151, 121, 78, 0.065), transparent 30%),
-    linear-gradient(180deg, #070808 0%, #050606 54%, #030404 100%);
-}
-
-.app::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.32;
-  background-image:
-    linear-gradient(rgba(255,255,255,0.018) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.014) 1px, transparent 1px);
-  background-size: 88px 88px;
-  mask-image: linear-gradient(to bottom, transparent, black 22%, black 78%, transparent);
-}
-
-.app::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(ellipse at center, transparent 34%, rgba(0,0,0,0.34) 100%);
-}
-
-.shell {
-  position: relative;
-  z-index: 2;
-  width: min(1480px, 100%);
-  min-height: 100vh;
-  margin: 0 auto;
-  overflow: hidden;
-}
-
-.topbar {
-  position: absolute;
-  z-index: 20;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 92px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 42px;
-  border-bottom: 1px solid rgba(255,255,255,0.045);
-  background: linear-gradient(
-    180deg,
-    rgba(5,6,6,0.94),
-    rgba(5,6,6,0.58),
-    transparent
-  );
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 13px;
-}
-
-.brand-mark {
-  width: 10px;
-  height: 10px;
-  transform: rotate(45deg);
-  border: 1px solid rgba(206,174,119,0.75);
-  box-shadow: 0 0 18px rgba(206,174,119,0.08);
-}
-
-.brand-name {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.22em;
-  color: #e9e2d5;
-}
-
-.brand-subtitle {
-  margin-left: 2px;
-  color: rgba(231,225,215,0.32);
-  font-size: 9px;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-}
-
-.system-state {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: rgba(231,225,215,0.42);
-  font-size: 9px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.state-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #b8ad91;
-  box-shadow: 0 0 12px rgba(184,173,145,0.4);
-}
-
-.stage {
-  position: absolute;
-  inset: 92px 0 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 42%);
-  transition: grid-template-columns 700ms cubic-bezier(.22,.75,.18,1);
-}
-
-.stage.has-workspace {
-  grid-template-columns: minmax(0, 55%) minmax(420px, 45%);
-}
-
-.presence-zone {
-  position: relative;
-  min-width: 0;
-  min-height: calc(100vh - 92px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition:
-    transform 700ms cubic-bezier(.22,.75,.18,1),
-    opacity 500ms ease;
-}
-
-.stage.has-workspace .presence-zone {
-  transform: translateX(-7%);
-}
-
-.atmosphere {
-  position: absolute;
-  width: min(680px, 72vw);
-  height: min(680px, 72vw);
-  border-radius: 50%;
-  background:
-    radial-gradient(
-      circle,
-      rgba(177,146,96,0.075) 0%,
-      rgba(177,146,96,0.028) 24%,
-      transparent 62%
-    );
-  filter: blur(2px);
-  pointer-events: none;
-}
-
-.atmosphere-ring {
-  position: absolute;
-  width: min(500px, 62vw);
-  height: min(500px, 62vw);
-  border-radius: 50%;
-  border: 1px solid rgba(198,168,113,0.07);
-  box-shadow:
-    0 0 70px rgba(198,168,113,0.025),
-    inset 0 0 80px rgba(255,255,255,0.012);
-  animation: ringBreath 7s ease-in-out infinite;
-}
-
-@keyframes ringBreath {
-  0%, 100% {
-    transform: scale(0.985);
-    opacity: 0.65;
-  }
-  50% {
-    transform: scale(1.015);
-    opacity: 1;
-  }
-}
-
-.jurix {
-  position: relative;
-  width: min(430px, 58vw);
-  height: min(650px, 70vh);
-  min-width: 300px;
-  min-height: 470px;
-  transform: translateY(2%);
-  transition:
-    transform 700ms cubic-bezier(.22,.75,.18,1),
-    filter 500ms ease;
-  animation: presenceFloat 8s ease-in-out infinite;
-}
-
-.stage.has-workspace .jurix {
-  transform: translateY(2%) scale(0.91);
-}
-
-@keyframes presenceFloat {
-  0%, 100% {
-    translate: 0 0;
-  }
-  50% {
-    translate: 0 -5px;
-  }
-}
-
-.jurix-shadow {
-  position: absolute;
-  left: 50%;
-  bottom: 2%;
-  width: 55%;
-  height: 8%;
-  transform: translateX(-50%);
-  border-radius: 50%;
-  background: rgba(0,0,0,0.65);
-  filter: blur(18px);
-}
-
-.jurix-halo {
-  position: absolute;
-  left: 50%;
-  top: 8%;
-  width: 68%;
-  aspect-ratio: 1;
-  transform: translateX(-50%);
-  border-radius: 50%;
-  border: 1px solid rgba(210,183,135,0.045);
-  box-shadow:
-    0 0 80px rgba(184,151,95,0.045),
-    inset 0 0 70px rgba(255,255,255,0.018);
-}
-
-.jurix-head {
-  position: absolute;
-  z-index: 5;
-  top: 8%;
-  left: 50%;
-  width: 25%;
-  aspect-ratio: 0.78;
-  transform: translateX(-50%);
-  border-radius: 48% 48% 44% 44%;
-  background:
-    radial-gradient(
-      ellipse at 42% 31%,
-      rgba(232,215,194,0.25),
-      rgba(121,103,89,0.18) 35%,
-      rgba(31,30,29,0.96) 72%
-    );
-  box-shadow:
-    -16px 20px 32px rgba(0,0,0,0.5),
-    inset 8px -10px 25px rgba(0,0,0,0.45);
-  animation: headIdle 8s ease-in-out infinite;
-}
-
-@keyframes headIdle {
-  0%, 100% {
-    rotate: 0deg;
-  }
-  50% {
-    rotate: -0.7deg;
-  }
-}
-
-.hair {
-  position: absolute;
-  z-index: 6;
-  top: 5.2%;
-  left: 50%;
-  width: 30%;
-  height: 25%;
-  transform: translateX(-50%);
-  border-radius: 48% 52% 32% 32%;
-  background:
-    linear-gradient(105deg, #0a0a0a 0%, #1b1917 38%, #080808 68%, #020202 100%);
-  box-shadow:
-    -13px 13px 26px rgba(0,0,0,0.5),
-    9px 9px 22px rgba(0,0,0,0.35);
-}
-
-.hair::after {
-  content: "";
-  position: absolute;
-  right: -11%;
-  top: 17%;
-  width: 22%;
-  height: 78%;
-  border-radius: 50%;
-  background: linear-gradient(180deg, #11100f, #050505);
-  transform: rotate(-4deg);
-}
-
-.face-light {
-  position: absolute;
-  z-index: 7;
-  top: 14%;
-  left: 50%;
-  width: 18%;
-  height: 14%;
-  transform: translateX(-50%);
-  border-radius: 50%;
-  background:
-    radial-gradient(
-      ellipse,
-      rgba(240,226,210,0.15),
-      rgba(240,226,210,0.035) 48%,
-      transparent 70%
-    );
-  filter: blur(5px);
-}
-
-.eyes {
-  position: absolute;
-  z-index: 9;
-  top: 20%;
-  left: 50%;
-  width: 16%;
-  height: 3%;
-  transform: translateX(-50%);
-  display: flex;
-  justify-content: space-between;
-}
-
-.eye {
-  width: 27%;
-  height: 100%;
-  border-radius: 50%;
-  background: rgba(229,220,206,0.24);
-  box-shadow: 0 0 9px rgba(224,208,178,0.12);
-  animation: blink 6s infinite;
-}
-
-.eye:last-child {
-  animation-delay: 120ms;
-}
-
-@keyframes blink {
-  0%, 45%, 48%, 100% {
-    transform: scaleY(1);
-  }
-  46%, 47% {
-    transform: scaleY(0.08);
-  }
-}
-
-.neck {
-  position: absolute;
-  z-index: 3;
-  top: 27%;
-  left: 50%;
-  width: 10%;
-  height: 9%;
-  transform: translateX(-50%);
-  background: linear-gradient(90deg, #191817, #383330, #151413);
-}
-
-.torso {
-  position: absolute;
-  z-index: 2;
-  left: 50%;
-  top: 31%;
-  width: 43%;
-  height: 48%;
-  transform: translateX(-50%);
-  clip-path: polygon(10% 0, 90% 0, 100% 100%, 0 100%);
-  background:
-    linear-gradient(
-      105deg,
-      #111111 0%,
-      #292623 28%,
-      #151515 50%,
-      #24211f 73%,
-      #0b0b0b 100%
-    );
-  box-shadow:
-    inset 25px 0 40px rgba(255,255,255,0.015),
-    inset -30px 0 35px rgba(0,0,0,0.38);
-}
-
-.blazer-left,
-.blazer-right {
-  position: absolute;
-  z-index: 4;
-  top: 31%;
-  width: 23%;
-  height: 47%;
-  background: linear-gradient(105deg, #0a0a0a, #252321, #101010);
-}
-
-.blazer-left {
-  left: 28%;
-  clip-path: polygon(0 0, 100% 7%, 75% 100%, 0 90%);
-  transform: rotate(2deg);
-}
-
-.blazer-right {
-  right: 28%;
-  clip-path: polygon(0 7%, 100% 0, 100% 90%, 25% 100%);
-  transform: rotate(-2deg);
-}
-
-.blazer-neck {
-  position: absolute;
-  z-index: 6;
-  top: 31%;
-  left: 50%;
-  width: 18%;
-  height: 22%;
-  transform: translateX(-50%);
-  clip-path: polygon(0 0, 100% 0, 58% 100%, 42% 100%);
-  background: linear-gradient(90deg, #111, #312d29, #101010);
-}
-
-.blazer-seam {
-  position: absolute;
-  z-index: 8;
-  top: 39%;
-  left: 50%;
-  width: 1px;
-  height: 34%;
-  transform: translateX(-50%);
-  background: linear-gradient(
-    180deg,
-    rgba(213,185,135,0.11),
-    rgba(255,255,255,0.025),
-    transparent
-  );
-}
-
-.arm {
-  position: absolute;
-  z-index: 1;
-  top: 34%;
-  width: 13%;
-  height: 44%;
-  border-radius: 30px;
-  background: linear-gradient(105deg, #0d0d0d, #292725 52%, #111);
-}
-
-.arm-left {
-  left: 18%;
-  transform: rotate(7deg);
-}
-
-.arm-right {
-  right: 18%;
-  transform: rotate(-7deg);
-}
-
-.hand {
-  position: absolute;
-  z-index: 7;
-  top: 73%;
-  width: 11%;
-  height: 11%;
-  border-radius: 48%;
-  background: radial-gradient(circle at 35% 30%, #514a44, #201e1c 66%, #0c0c0c);
-}
-
-.hand-left {
-  left: 17%;
-  transform: rotate(9deg);
-}
-
-.hand-right {
-  right: 17%;
-  transform: rotate(-9deg);
-}
-
-.presence-copy {
-  position: absolute;
-  z-index: 20;
-  left: 42px;
-  bottom: 38px;
-  pointer-events: none;
-}
-
-.presence-name {
-  font-size: 11px;
-  letter-spacing: 0.42em;
-  color: rgba(235,226,210,0.82);
-}
-
-.presence-status {
-  margin-top: 9px;
-  color: rgba(235,226,210,0.3);
-  font-size: 8px;
-  letter-spacing: 0.26em;
-  text-transform: uppercase;
-}
-
-.voice-control {
-  position: absolute;
-  z-index: 30;
-  left: 50%;
-  bottom: 34px;
-  width: 68px;
-  height: 68px;
-  transform: translateX(-50%);
-  border: 1px solid rgba(218,198,165,0.25);
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 38% 32%, rgba(255,255,255,0.08), transparent 50%),
-    rgba(10,10,9,0.72);
-  color: rgba(238,231,218,0.8);
-  cursor: pointer;
-  box-shadow:
-    0 18px 50px rgba(0,0,0,0.42),
-    0 0 30px rgba(198,166,105,0.035);
-  transition:
-    transform 220ms ease,
-    border-color 220ms ease,
-    background 220ms ease;
-}
-
-.voice-control:hover {
-  transform: translateX(-50%) scale(1.035);
-  border-color: rgba(218,198,165,0.48);
-}
-
-.voice-control.active {
-  border-color: rgba(198,166,105,0.7);
-  box-shadow:
-    0 0 0 7px rgba(198,166,105,0.045),
-    0 18px 50px rgba(0,0,0,0.42);
-}
-
-.mic {
-  position: relative;
-  display: block;
-  width: 13px;
-  height: 24px;
-  margin: 0 auto;
-  border: 1px solid currentColor;
-  border-radius: 8px;
-}
-
-.mic::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: -9px;
-  width: 20px;
-  height: 13px;
-  transform: translateX(-50%);
-  border: 1px solid currentColor;
-  border-top: 0;
-  border-radius: 0 0 12px 12px;
-}
-
-.mic::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: -14px;
-  width: 1px;
-  height: 6px;
-  transform: translateX(-50%);
-  background: currentColor;
-}
-
-.secondary-trigger {
-  position: absolute;
-  z-index: 30;
-  left: calc(50% + 48px);
-  bottom: 45px;
-  width: 44px;
-  height: 44px;
-  border: 1px solid rgba(255,255,255,0.07);
-  border-radius: 50%;
-  background: rgba(12,12,11,0.7);
-  color: rgba(238,231,218,0.38);
-  cursor: pointer;
-  transition: 180ms ease;
-}
-
-.secondary-trigger:hover {
-  color: rgba(238,231,218,0.75);
-  border-color: rgba(255,255,255,0.16);
-}
-
-.command-drawer {
-  position: absolute;
-  z-index: 40;
-  left: 50%;
-  bottom: 96px;
-  width: min(520px, calc(100% - 44px));
-  transform: translate(-50%, 16px);
-  opacity: 0;
-  pointer-events: none;
-  padding: 14px;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 16px;
-  background: rgba(9,10,10,0.94);
-  backdrop-filter: blur(22px);
-  box-shadow: 0 24px 80px rgba(0,0,0,0.48);
-  transition: 220ms ease;
-}
-
-.command-drawer.open {
-  transform: translate(-50%, 0);
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.command-row {
-  display: flex;
-  gap: 9px;
-}
-
-.command-input {
-  flex: 1;
-  min-width: 0;
-  height: 48px;
-  padding: 0 16px;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 10px;
-  outline: none;
-  background: rgba(255,255,255,0.025);
-  color: #eee9df;
-}
-
-.command-input:focus {
-  border-color: rgba(203,174,124,0.34);
-}
-
-.command-send {
-  width: 48px;
-  border-radius: 10px;
-  background: rgba(205,174,119,0.13);
-  color: #e8ddca;
-  cursor: pointer;
-}
-
-.command-hints {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.command-hint {
-  flex: 0 0 auto;
-  padding: 7px 10px;
-  border: 1px solid rgba(255,255,255,0.055);
-  border-radius: 999px;
-  background: transparent;
-  color: rgba(238,231,218,0.42);
-  font-size: 9px;
-  cursor: pointer;
-}
-
-.workspace {
-  position: relative;
-  min-width: 0;
-  min-height: 100%;
-  padding: 42px 42px 42px 12px;
-  display: flex;
-  align-items: center;
-  opacity: 0;
-  transform: translateX(35px);
-  pointer-events: none;
-  transition:
-    opacity 450ms ease,
-    transform 700ms cubic-bezier(.22,.75,.18,1);
-}
-
-.stage.has-workspace .workspace {
-  opacity: 1;
-  transform: translateX(0);
-  pointer-events: auto;
-}
-
-.workspace-panel {
-  width: 100%;
-  max-height: calc(100vh - 176px);
-  overflow: auto;
-  padding: 28px;
-  border-left: 1px solid rgba(255,255,255,0.07);
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255,255,255,0.1) transparent;
-}
-
-.workspace-kicker {
-  color: rgba(208,184,143,0.68);
-  font-size: 8px;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-}
-
-.workspace-title {
-  margin: 12px 0 8px;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(30px, 3.2vw, 48px);
-  font-weight: 400;
-  letter-spacing: -0.035em;
-  color: #eae4da;
-}
-
-.workspace-description {
-  max-width: 560px;
-  margin: 0;
-  color: rgba(235,229,219,0.43);
-  font-size: 12px;
-  line-height: 1.8;
-}
-
-.workspace-line {
-  width: 100%;
-  height: 1px;
-  margin: 28px 0;
-  background: rgba(255,255,255,0.065);
-}
-
-.data-block {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.data-cell {
-  padding: 17px;
-  border: 1px solid rgba(255,255,255,0.065);
-  background: rgba(255,255,255,0.018);
-}
-
-.data-label {
-  color: rgba(235,229,219,0.32);
-  font-size: 8px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.data-value {
-  margin-top: 9px;
-  color: rgba(240,234,224,0.82);
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 24px;
-}
-
-.message-list {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.message {
-  max-width: 85%;
-  padding: 12px 15px;
-  border-radius: 12px;
-  font-size: 11px;
-  line-height: 1.65;
-}
-
-.message.jurix {
-  align-self: flex-start;
-  border: 1px solid rgba(255,255,255,0.055);
-  background: rgba(255,255,255,0.018);
-  color: rgba(235,229,219,0.62);
-}
-
-.message.user {
-  align-self: flex-end;
-  background: rgba(198,166,105,0.1);
-  color: rgba(239,231,216,0.72);
-}
-
-.workspace-close {
-  position: absolute;
-  top: 18px;
-  right: 24px;
-  color: rgba(235,229,219,0.35);
-  background: transparent;
-  cursor: pointer;
-  font-size: 18px;
-}
-
-.footer-nav {
-  position: absolute;
-  z-index: 20;
-  right: 42px;
-  bottom: 40px;
-  display: flex;
-  gap: 28px;
-}
-
-.footer-nav button {
-  padding: 0;
-  background: transparent;
-  color: rgba(235,229,219,0.26);
-  font-size: 8px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: color 180ms ease;
-}
-
-.footer-nav button:hover {
-  color: rgba(235,229,219,0.7);
-}
-
-.security-event {
-  position: absolute;
-  z-index: 50;
-  top: 110px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 9px 14px;
-  border: 1px solid rgba(190,161,112,0.17);
-  background: rgba(30,25,18,0.68);
-  backdrop-filter: blur(15px);
-  color: rgba(228,211,184,0.66);
-  font-size: 8px;
-  letter-spacing: 0.17em;
-  text-transform: uppercase;
-}
-
-@media (max-width: 900px) {
-  body {
-    overflow: auto;
-  }
-
-  .topbar {
-    padding: 0 22px;
-  }
-
-  .brand-subtitle {
-    display: none;
-  }
-
-  .stage,
-  .stage.has-workspace {
-    position: relative;
-    inset: 92px 0 auto;
-    min-height: calc(100vh - 92px);
-    display: block;
-  }
-
-  .presence-zone {
-    min-height: calc(100vh - 92px);
-  }
-
-  .stage.has-workspace .presence-zone {
-    transform: translateY(-4%);
-  }
-
-  .workspace {
-    position: absolute;
-    inset: 0;
-    padding: 30px 20px;
-    background: rgba(5,6,6,0.94);
-    backdrop-filter: blur(18px);
-  }
-
-  .workspace-panel {
-    max-height: calc(100vh - 145px);
-    border-left: 0;
-    padding: 24px 10px;
-  }
-
-  .footer-nav {
-    display: none;
-  }
-
-  .presence-copy {
-    left: 22px;
-    bottom: 28px;
-  }
-
-  .jurix {
-    width: min(390px, 72vw);
-  }
-}
-
-@media (max-width: 560px) {
-  .topbar {
-    height: 76px;
-  }
-
-  .stage,
-  .stage.has-workspace {
-    inset: 76px 0 0;
-    min-height: calc(100vh - 76px);
-  }
-
-  .system-state {
-    font-size: 7px;
-  }
-
-  .jurix {
-    width: 86vw;
-    height: 68vh;
-  }
-
-  .voice-control {
-    bottom: 24px;
-  }
-
-  .secondary-trigger {
-    bottom: 35px;
-  }
-
-  .data-block {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    scroll-behavior: auto !important;
-    transition-duration: 0.001ms !important;
-  }
-}
-`;
-
-function App() {
-  const [presence, setPresence] = useState<PresenceMode>("idle");
-  const [workspace, setWorkspace] = useState<WorkspaceMode>("none");
-  const [commandOpen, setCommandOpen] = useState(false);
-  const [command, setCommand] = useState("");
-  const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
-  const [securityEvent, setSecurityEvent] = useState(false);
-
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const workspaceCopy = useMemo(() => {
-    switch (workspace) {
-      case "financial":
-        return {
-          kicker: "Financial intelligence",
-          title: "Your financial picture",
-          description:
-            "A contextual workspace appears only when financial information needs to be examined.",
-          values: [
-            ["Net position", "₹ —"],
-            ["Income", "₹ —"],
-            ["Committed", "₹ —"],
-            ["Available", "₹ —"],
-          ],
+export default function App() {
+  const [avatarMode, setAvatarMode] = useState<JurixAvatarMode>("idle");
+  const [presentationTrigger, setPresentationTrigger] = useState(0);
+  const [textInput, setTextInput] = useState("");
+  const handleTextSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!textInput.trim()) return;
+    processVoiceDirectiveRef.current(textInput.trim());
+    setTextInput("");
+  };
+  const [presentationActive, setPresentationActive] = useState(false);
+  const [isSummoned, setIsSummoned] = useState(false);
+  const [, setTranscript] = useState("");
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [activePlan, setActivePlan] = useState<DirectorPerformancePlan | null>(null);
+  const [, setLedgerSummary] = useState<LedgerSummary>(DEFAULT_SUMMARY);
+
+  const voiceGatewayRef = useRef<JurixVoiceGateway | null>(null);
+  const directorRef = useRef<JurixDirector>(new JurixDirector());
+  const voiceActiveRef = useRef(false);
+  const processVoiceDirectiveRef = useRef<(command: string) => void>(() => {});
+
+  const fetchLedgerSummary = useCallback(async (): Promise<LedgerSummary> => {
+    try {
+      const res = await fetch("http://127.0.0.1:8000/api/summary");
+      if (res.ok) {
+        const raw = await res.json();
+        const records = Array.isArray(raw) ? raw : (raw.value || []);
+        
+        let totalExp = 0;
+        let bankExp = 0;
+        let cashExp = 0;
+        let txCount = 0;
+
+        records.forEach((r: any) => {
+          const exp = parseFloat(r.total_expenses || "0");
+          totalExp += isNaN(exp) ? 0 : exp;
+          if (r.account_id === "CASH") {
+            cashExp += isNaN(exp) ? 0 : exp;
+          } else {
+            bankExp += isNaN(exp) ? 0 : exp;
+          }
+          txCount += Number(r.total_transactions || 0);
+        });
+
+        const dailyCap = 4000;
+        const remaining = Math.max(0, dailyCap - totalExp);
+
+        const summary: LedgerSummary = {
+          total_expense: totalExp,
+          cash_expense: cashExp,
+          bank_expense: bankExp,
+          daily_cap: dailyCap,
+          remaining_budget: remaining,
+          transaction_count: txCount
         };
-      case "legal":
-        return {
-          kicker: "Legal intelligence",
-          title: "Evidence workspace",
-          description:
-            "Relevant evidence, sources and legal reasoning will appear here without turning the main experience into a dashboard.",
-          values: [
-            ["Jurisdiction", "—"],
-            ["Evidence", "—"],
-            ["Sources", "—"],
-            ["Confidence", "—"],
-          ],
-        };
-      case "security":
-        return {
-          kicker: "Security intelligence",
-          title: "System security",
-          description:
-            "Security information is presented contextually when the system needs your attention.",
-          values: [
-            ["Identity", "Verified"],
-            ["Session", "Active"],
-            ["Authority", "Protected"],
-            ["Risk", "Normal"],
-          ],
-        };
-      default:
-        return null;
+
+        setLedgerSummary(summary);
+        return summary;
+      }
+    } catch (err) {
+      console.warn("Backend server not reachable on port 8000; using local cache.", err);
     }
-  }, [workspace]);
+    return DEFAULT_SUMMARY;
+  }, []);
 
   useEffect(() => {
-    if (commandOpen) {
-      window.setTimeout(() => inputRef.current?.focus(), 80);
+    fetchLedgerSummary();
+  }, [fetchLedgerSummary]);
+
+  const speakPlan = (plan: DirectorPerformancePlan, nextMode: JurixAvatarMode = "speaking") => {
+    setActivePlan(plan);
+    directorRef.current.loadPlan(plan);
+
+    const mode = plan.displayMode || "written";
+    if (mode === "written") {
+      setIsSummoned(true);
+      setPresentationActive(false);
+    } else if (mode === "visual") {
+      setIsSummoned(false);
+      setPresentationActive(true);
+      setPresentationTrigger((n) => n + 1);
+    } else if (mode === "both") {
+      setIsSummoned(true);
+      setPresentationActive(true);
+      setPresentationTrigger((n) => n + 1);
     }
-  }, [commandOpen]);
 
-  useEffect(() => {
-    if (presence === "idle") return;
+    voiceGatewayRef.current?.stop();
+    setAvatarMode(nextMode);
 
-    const timer = window.setTimeout(() => {
-      setPresence("idle");
-    }, presence === "listening" ? 1200 : 1700);
+    if (!("speechSynthesis" in window)) {
+      setAvatarMode("idle");
+      if (voiceActiveRef.current) {
+        setTimeout(() => voiceGatewayRef.current?.start(), 300);
+      }
+      return;
+    }
 
-    return () => window.clearTimeout(timer);
-  }, [presence]);
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(plan.speechText);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
 
-  const startListening = () => {
-    setPresence("listening");
-    setCommandOpen(false);
+    utterance.onstart = () => {
+      setAvatarMode(nextMode === "greeting" ? "greeting" : "speaking");
+    };
+
+    const resumeListening = () => {
+      setAvatarMode("idle");
+      if (voiceActiveRef.current) {
+        setTimeout(() => voiceGatewayRef.current?.start(), 300);
+      }
+    };
+
+    utterance.onend = resumeListening;
+    utterance.onerror = resumeListening;
+    window.speechSynthesis.speak(utterance);
   };
 
-  const submitCommand = () => {
-    const text = command.trim();
+  const triggerDailySpendsWritten = async () => {
+    const summary = await fetchLedgerSummary();
+    const spentStr = `₹ ${summary.total_expense.toLocaleString("en-IN")}`;
+    const remStr = `₹ ${summary.remaining_budget.toLocaleString("en-IN")}`;
+    const bankStr = `₹ ${summary.bank_expense.toLocaleString("en-IN")}`;
+    const cashStr = `₹ ${summary.cash_expense.toLocaleString("en-IN")}`;
 
-    if (!text) return;
-
-    const nextId = messages.length + 1;
-
-    setMessages((current) => [
-      ...current,
-      {
-        id: nextId,
-        role: "user",
-        text,
+    const plan: DirectorPerformancePlan = {
+      planId: "DAILY_SPENDS_WRITTEN",
+      totalDurationMs: 4000,
+      displayMode: "written",
+      speechText: `Your total expense logged today is ${spentStr}. You have ${remStr} remaining in your daily budget.`,
+      cardContent: {
+        title: "LIVE LEDGER SPEND",
+        primaryValue: spentStr,
+        delta: summary.remaining_budget > 0 ? "Within Daily Cap" : "Cap Exceeded",
+        bodyText: `Online/Bank: ${bankStr} | Cash Wallet: ${cashStr}. Remaining daily discretionary budget: ${remStr}.`,
+        actionLabel: "VIEW AUDIT LOG",
       },
-    ]);
-
-    setCommand("");
-    setPresence("thinking");
-
-    window.setTimeout(() => {
-      setMessages((current) => [
-        ...current,
-        {
-          id: nextId + 1,
-          role: "jurix",
-          text:
-            "I’ve received that request. The intelligence layer is ready; live financial, legal, or external data will be introduced only when the request requires it.",
-        },
-      ]);
-      setPresence("speaking");
-    }, 700);
+      postureSequence: [
+        { ptsMs: 0, posture: "SEATED_DESK", gaze: "CAMERA_USER", gesture: "SPEAKING" }
+      ],
+      hologram: { title: "DAILY_SPENDS", metrics: [], series: [] }
+    };
+    speakPlan(plan);
   };
 
-  const openWorkspace = (mode: WorkspaceMode) => {
-    setWorkspace((current) => (current === mode ? "none" : mode));
-    setSecurityEvent(mode === "security");
+  const triggerPortfolioVisual = () => {
+    const plan: DirectorPerformancePlan = {
+      planId: "PORTFOLIO_RUNWAY_VISUAL",
+      totalDurationMs: 5000,
+      displayMode: "visual",
+      speechText: "Displaying your portfolio net worth and asset distribution. Your total verified portfolio stands at ₹ 1.48 Crore.",
+      visualData: {
+        primaryMetric: "₹ 1.48 Cr",
+        metricLabel: "TOTAL PORTFOLIO NET WORTH",
+        targetDelta: "+16.8% YoY",
+        monthlySavings: "₹ 1.85 L",
+        monthlyBurn: "₹ 65,000",
+        chartPoints: [
+          { label: "Apr", value: 0.35, display: "₹ 98 L" },
+          { label: "Jul", value: 0.52, display: "₹ 1.12 Cr" },
+          { label: "Oct", value: 0.70, display: "₹ 1.28 Cr" },
+          { label: "Jan", value: 0.88, display: "₹ 1.48 Cr" },
+        ],
+        allocations: [
+          { category: "Equity & Mutual Funds", pct: 0.52, amount: "₹ 76.9 L", color: "#38bdf8" },
+          { category: "Fixed Deposits & Debt", pct: 0.28, amount: "₹ 41.4 L", color: "#818cf8" },
+          { category: "Physical Gold & SGB", pct: 0.12, amount: "₹ 17.8 L", color: "#fbbf24" },
+          { category: "Liquid Savings Buffer", pct: 0.08, amount: "₹ 11.9 L", color: "#34d399" },
+        ],
+      },
+      postureSequence: [
+        { ptsMs: 0, posture: "PRESENT_HOLOGRAM", gaze: "HOLOGRAM_DATA", gesture: "PRESENT_TABLET" }
+      ],
+      hologram: { title: "PORTFOLIO_RUNWAY", metrics: [], series: [] }
+    };
+    speakPlan(plan);
+  };
 
-    if (mode === "security") {
-      window.setTimeout(() => setSecurityEvent(false), 2600);
+  const triggerNetWorthBoth = async () => {
+    const summary = await fetchLedgerSummary();
+    const spentStr = `₹ ${summary.total_expense.toLocaleString("en-IN")}`;
+
+    const plan: DirectorPerformancePlan = {
+      planId: "NET_WORTH_FULL_AUDIT",
+      totalDurationMs: 6000,
+      displayMode: "both",
+      speechText: "Activating complete portfolio audit. Telemetric asset breakdown is projected, and the written summary is on your screen.",
+      cardContent: {
+        title: "PORTFOLIO POSITION",
+        primaryValue: "₹ 1.48 Cr",
+        delta: "+16.8% YoY",
+        bodyText: `Verified asset holdings: Equity & Debt active. Today's live expense stream logged: ${spentStr}. Zero debt liabilities.`,
+        actionLabel: "DOWNLOAD TAX AUDIT",
+      },
+      visualData: {
+        primaryMetric: "₹ 1.48 Cr",
+        metricLabel: "TOTAL PORTFOLIO NET WORTH",
+        targetDelta: "+16.8% YoY",
+        monthlySavings: "₹ 1.85 L",
+        monthlyBurn: "₹ 65,000",
+        chartPoints: [
+          { label: "Apr", value: 0.35, display: "₹ 98 L" },
+          { label: "Jul", value: 0.52, display: "₹ 1.12 Cr" },
+          { label: "Oct", value: 0.70, display: "₹ 1.28 Cr" },
+          { label: "Jan", value: 0.88, display: "₹ 1.48 Cr" },
+        ],
+        allocations: [
+          { category: "Equity & Mutual Funds", pct: 0.52, amount: "₹ 76.9 L", color: "#38bdf8" },
+          { category: "Fixed Deposits & Debt", pct: 0.28, amount: "₹ 41.4 L", color: "#818cf8" },
+          { category: "Physical Gold & SGB", pct: 0.12, amount: "₹ 17.8 L", color: "#fbbf24" },
+          { category: "Liquid Savings Buffer", pct: 0.08, amount: "₹ 11.9 L", color: "#34d399" },
+        ],
+      },
+      postureSequence: [
+        { ptsMs: 0, posture: "PRESENT_HOLOGRAM", gaze: "HOLOGRAM_DATA", gesture: "PRESENT_TABLET" }
+      ],
+      hologram: { title: "NET_WORTH_AUDIT", metrics: [], series: [] }
+    };
+    speakPlan(plan);
+  };
+
+  const logVoiceCashExpense = async (amount: number, category: string) => {
+    try {
+      const res = await fetch("http://127.0.0.1:8000/v1/transactions/cash", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount, category }),
+      });
+
+      if (res.ok) {
+        const summary = await fetchLedgerSummary();
+        const amtStr = `₹ ${amount.toLocaleString("en-IN")}`;
+        const remStr = `₹ ${summary.remaining_budget.toLocaleString("en-IN")}`;
+
+        const plan: DirectorPerformancePlan = {
+          planId: "CASH_LOGGED",
+          totalDurationMs: 4000,
+          displayMode: "written",
+          speechText: `Recorded ${amtStr} cash for ${category}. You have ${remStr} remaining today.`,
+          cardContent: {
+            title: "CASH EXPENSE RECORDED",
+            primaryValue: amtStr,
+            delta: "CASH_WALLET",
+            bodyText: `Category: ${category}. Remaining daily discretionary budget: ${remStr}.`,
+            actionLabel: "CONFIRM ENTRY",
+          },
+          postureSequence: [
+            { ptsMs: 0, posture: "SEATED_DESK", gaze: "CAMERA_USER", gesture: "SPEAKING" }
+          ],
+          hologram: { title: "CASH_RECORDED", metrics: [], series: [] }
+        };
+        speakPlan(plan);
+        return;
+      }
+    } catch {
+      console.error("Failed to post cash transaction to backend");
     }
+
+    const fallbackPlan: DirectorPerformancePlan = {
+      planId: "CASH_FAIL",
+      totalDurationMs: 3000,
+      displayMode: "written",
+      speechText: "Could not connect to the local ledger. Make sure the backend service is running.",
+      cardContent: {
+        title: "LEDGER CONNECTION ERROR",
+        primaryValue: "OFFLINE",
+        delta: "PORT 8000",
+        bodyText: "Please verify backend server status.",
+      },
+      postureSequence: [{ ptsMs: 0, posture: "SEATED_DESK", gaze: "CAMERA_USER", gesture: "SPEAKING" }],
+      hologram: { title: "ERROR", metrics: [], series: [] }
+    };
+    speakPlan(fallbackPlan);
+  };
+
+  const processVoiceDirective = (command: string) => {
+    const text = command.trim().toLowerCase().replace(/[.!?,]+$/g, "").trim();
+
+    // 1. Natural Voice Cash Logging:
+    // Matches: "spent 300 cash on auto", "paid 150 for tea", "log 500 cash lunch"
+    const cashRegex = /(?:spent|paid|log|add)\s*(?:rs\.?|inr)?\s*([0-9]+)\s*(?:rs|rupees|inr|cash)?\s*(?:for|on|in)?\s*(.*)/i;
+    const match = text.match(cashRegex);
+    if (match && (text.includes("cash") || text.includes("spent") || text.includes("paid"))) {
+      const amount = parseInt(match[1], 10);
+      let category = match[2]?.trim() || "General Expense";
+      if (!category || category === "cash") category = "Cash / General";
+      logVoiceCashExpense(amount, category);
+      return;
+    }
+
+    // 2. Greeting / Wake phrase
+    const isGreeting = (
+      /^(hi|hello|hey|good morning|good afternoon|good evening)(\s+jurix)?$/.test(text) ||
+      /^jurix$/.test(text)
+    );
+
+    if (isGreeting) {
+      const plan: DirectorPerformancePlan = {
+        planId: "GREETING_PLAN",
+        totalDurationMs: 2500,
+        displayMode: "written",
+        speechText: "Hello Chetan. Jurix is online and monitoring your financial portfolio. How can I assist you?",
+        cardContent: {
+          title: "JURIX ACTIVE",
+          primaryValue: "ONLINE",
+          delta: "SYSTEM READY",
+          bodyText: "Voice engine connected. You can log cash by saying 'spent 200 cash on auto', or say 'show visual portfolio'.",
+        },
+        postureSequence: [{ ptsMs: 0, posture: "SEATED_DESK", gaze: "CAMERA_USER", gesture: "SPEAKING" }],
+        hologram: { title: "STANDBY", metrics: [], series: [] }
+      };
+      speakPlan(plan, "greeting");
+      return;
+    }
+
+      // 3. Dismiss command
+      if (/\b(dismiss|close|hide|collapse|clear|stop)\b/.test(text)) {
+        setIsSummoned(false);
+        setPresentationActive(false);
+        const plan: DirectorPerformancePlan = {
+          planId: "DISMISS_PLAN",
+          totalDurationMs: 1200,
+          displayMode: "written",
+          speechText: "Hiding presentation display.",
+          postureSequence: [{ ptsMs: 0, posture: "SEATED_DESK", gaze: "CAMERA_USER", gesture: "SPEAKING" }],
+          hologram: { title: "CLOSED", metrics: [], series: [] }
+        };
+        speakPlan(plan);
+        return;
+      }
+
+      // 4. Visual 3D Projection Request
+      if (/\b(visual|hologram|chart|charts|project|projection|show me visual|show visually)\b/.test(text)) {
+        triggerPortfolioVisual();
+        return;
+      }
+
+      // 5. Daily Spend / Ledger Query
+      if (/\b(spend|spends|spent|spending|expense|expenses|summary|balance|audit|how much)\b/.test(text)) {
+        triggerDailySpendsWritten();
+        return;
+      }
+
+      // 6. Net Worth / Full Audit Request
+      if (/\b(net worth|audit everything|both|full audit|portfolio)\b/.test(text)) {
+        triggerNetWorthBoth();
+        return;
+      }
+
+      // Fallback acknowledgment
+      const defaultPlan: DirectorPerformancePlan = {
+        planId: "GENERAL_ACK",
+        totalDurationMs: 3000,
+        displayMode: "written",
+        speechText: `Directive noted: "${command}". Querying financial engine.`,
+        cardContent: {
+          title: "DIRECTIVE ACKNOWLEDGED",
+          primaryValue: "PROCESSING",
+          delta: "SYSTEM ACTIVE",
+          bodyText: `Understood: "${command}". Available commands: 'how much did i spend', 'spent 150 cash on lunch', or 'show visual'.`,
+        },
+        postureSequence: [{ ptsMs: 0, posture: "SEATED_DESK", gaze: "CAMERA_USER", gesture: "SPEAKING" }],
+        hologram: { title: "ACKNOWLEDGED", metrics: [], series: [] }
+      };
+      speakPlan(defaultPlan);
+    };
+
+  useEffect(() => {
+    processVoiceDirectiveRef.current = processVoiceDirective;
+  });
+
+  useEffect(() => {
+    const gateway = new JurixVoiceGateway();
+    voiceGatewayRef.current = gateway;
+
+    gateway.setCallbacks({
+      onStateChange: (state) => {
+        if (state === "listening") {
+          setAvatarMode("listening");
+        } else if (state === "idle" && (!("speechSynthesis" in window) || !window.speechSynthesis.speaking)) {
+          setAvatarMode("idle");
+        }
+      },
+      onTranscript: (userText) => {
+        setTranscript(userText);
+        processVoiceDirectiveRef.current(userText);
+      },
+      onError: (err) => {
+        console.error("Voice gateway error:", err);
+      }
+    });
+
+    return () => {
+      voiceActiveRef.current = false;
+      gateway.stop();
+      if (voiceGatewayRef.current === gateway) {
+        voiceGatewayRef.current = null;
+      }
+    };
+  }, []);
+
+  const toggleVoice = () => {
+    if (!voiceGatewayRef.current) return;
+
+    if (voiceActiveRef.current) {
+      voiceActiveRef.current = false;
+      voiceGatewayRef.current.stop();
+      setVoiceActive(false);
+      setAvatarMode("idle");
+      return;
+    }
+
+    voiceActiveRef.current = true;
+    setVoiceActive(true);
+    voiceGatewayRef.current.start();
   };
 
   return (
-    <>
-      <style>{styles}</style>
+    <div className="relative w-screen h-screen overflow-hidden bg-[#010308] text-slate-100 font-mono select-none">
+      <img
+        aria-hidden="true"
+        src="/images/jurix_presentation_background_v3.jpg"
+        alt=""
+        className="absolute inset-0 h-full w-full object-cover object-center"
+        style={{ zIndex: 0, imageRendering: "auto" }}
+      />
 
-      <main className="app">
-        <div className="shell">
-          <header className="topbar">
-            <div className="brand">
-              <span className="brand-mark" aria-hidden="true" />
-              <span className="brand-name">OVELA</span>
-              <span className="brand-subtitle">Private intelligence</span>
-            </div>
+      {/* 3D AVATAR & PROJECTION STAGE */}
+      <div className="absolute inset-0 z-0">
+        <JurixWebRTCStage
+          mode={avatarMode}
+          presentationTrigger={presentationTrigger}
+          presentationActive={presentationActive}
+          presentationData={activePlan?.visualData}
+        />
+      </div>
 
-            <div className="system-state">
-              <span className="state-dot" />
-              {presence === "listening"
-                ? "Listening"
-                : presence === "thinking"
-                  ? "Thinking"
-                  : presence === "speaking"
-                    ? "Speaking"
-                    : "Ready"}
-            </div>
-          </header>
-
-          {securityEvent && (
-            <div className="security-event">
-              Security context active · authority remains protected
-            </div>
-          )}
-
-          <section className={`stage ${workspace !== "none" ? "has-workspace" : ""}`}>
-            <section className="presence-zone">
-              <div className="atmosphere" />
-              <div className="atmosphere-ring" />
-
-              <div className="jurix" aria-label="JURIX presence">
-                <div className="jurix-shadow" />
-                <div className="jurix-halo" />
-
-                <div className="hair" />
-                <div className="jurix-head" />
-                <div className="face-light" />
-
-                <div className="eyes">
-                  <span className="eye" />
-                  <span className="eye" />
+      {/* 2D WRITTEN CARD */}
+      <div className="absolute inset-0 z-20 pointer-events-none">
+        <AnimatePresence>
+          {isSummoned && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.88, x: 70, rotateY: 15 }}
+              animate={{ opacity: 1, scale: 1, x: 0, rotateY: -6 }}
+              exit={{ opacity: 0, scale: 0.9, x: 50 }}
+              transition={{ type: "spring", stiffness: 130, damping: 20 }}
+              className="pointer-events-auto absolute right-6 top-10 md:right-8 md:top-8 w-[min(340px,92vw)] bg-gradient-to-b from-[#031525]/92 via-[#020b14]/96 to-[#01060c]/98 border border-cyan-400/40 rounded-2xl p-4 shadow-[0_0_45px_rgba(6,182,212,0.22)] backdrop-blur-3xl"
+              style={{ perspective: 1200 }}
+            >
+              <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-cyan-300" />
+                  <span className="text-[11px] tracking-widest text-cyan-400 font-bold uppercase">
+                    {activePlan?.cardContent?.title || activePlan?.hologram.title || "EXECUTIVE ADVISOR"}
+                  </span>
                 </div>
-
-                <div className="neck" />
-                <div className="torso" />
-                <div className="blazer-left" />
-                <div className="blazer-right" />
-                <div className="blazer-neck" />
-                <div className="blazer-seam" />
-
-                <div className="arm arm-left" />
-                <div className="arm arm-right" />
-
-                <div className="hand hand-left" />
-                <div className="hand hand-right" />
+                <button
+                  onClick={() => setIsSummoned(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
 
-              <div className="presence-copy">
-                <div className="presence-name">JURIX</div>
-                <div className="presence-status">
-                  {presence === "listening"
-                    ? "Listening"
-                    : presence === "thinking"
-                      ? "Considering"
-                      : presence === "speaking"
-                        ? "Speaking"
-                        : "Present"}
-                </div>
-              </div>
-
-              <button
-                className={`voice-control ${presence === "listening" ? "active" : ""}`}
-                type="button"
-                aria-label="Talk to JURIX"
-                onClick={startListening}
-              >
-                <span className="mic" />
-              </button>
-
-              <button
-                className="secondary-trigger"
-                type="button"
-                aria-label="Open text interaction"
-                aria-expanded={commandOpen}
-                onClick={() => setCommandOpen((open) => !open)}
-              >
-                ···
-              </button>
-
-              <div className={`command-drawer ${commandOpen ? "open" : ""}`}>
-                <div className="command-row">
-                  <input
-                    ref={inputRef}
-                    className="command-input"
-                    value={command}
-                    onChange={(event) => setCommand(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        submitCommand();
-                      }
-
-                      if (event.key === "Escape") {
-                        setCommandOpen(false);
-                      }
-                    }}
-                    placeholder="Ask JURIX privately..."
-                    aria-label="Message JURIX"
-                  />
-
-                  <button
-                    className="command-send"
-                    type="button"
-                    onClick={submitCommand}
-                    aria-label="Send message"
-                  >
-                    →
-                  </button>
-                </div>
-
-                <div className="command-hints">
-                  <button
-                    className="command-hint"
-                    type="button"
-                    onClick={() => {
-                      setCommand("Show my financial position");
-                      inputRef.current?.focus();
-                    }}
-                  >
-                    Financial position
-                  </button>
-
-                  <button
-                    className="command-hint"
-                    type="button"
-                    onClick={() => {
-                      setCommand("Review this legal matter");
-                      inputRef.current?.focus();
-                    }}
-                  >
-                    Legal review
-                  </button>
-
-                  <button
-                    className="command-hint"
-                    type="button"
-                    onClick={() => {
-                      setCommand("Check system security");
-                      inputRef.current?.focus();
-                    }}
-                  >
-                    Security
-                  </button>
-                </div>
-              </div>
-            </section>
-
-            <aside className="workspace">
-              {workspaceCopy && (
-                <div className="workspace-panel">
-                  <button
-                    className="workspace-close"
-                    type="button"
-                    aria-label="Close workspace"
-                    onClick={() => setWorkspace("none")}
-                  >
-                    ×
-                  </button>
-
-                  <div className="workspace-kicker">
-                    {workspaceCopy.kicker}
-                  </div>
-
-                  <h1 className="workspace-title">{workspaceCopy.title}</h1>
-
-                  <p className="workspace-description">
-                    {workspaceCopy.description}
-                  </p>
-
-                  <div className="workspace-line" />
-
-                  <div className="data-block">
-                    {workspaceCopy.values.map(([label, value]) => (
-                      <div className="data-cell" key={label}>
-                        <div className="data-label">{label}</div>
-                        <div className="data-value">{value}</div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="workspace-line" />
-
-                  <div className="message-list">
-                    {messages.slice(-4).map((message) => (
-                      <div
-                        className={`message ${message.role}`}
-                        key={message.id}
-                      >
-                        {message.text}
-                      </div>
-                    ))}
-                  </div>
+              {activePlan?.cardContent?.primaryValue && (
+                <div className="mb-3 flex items-baseline justify-between">
+                  <span className="text-3xl font-extrabold text-cyan-200 tracking-tight">
+                    {activePlan.cardContent.primaryValue}
+                  </span>
+                  {activePlan.cardContent.delta && (
+                    <span className="text-xs text-emerald-400 font-semibold">
+                      {activePlan.cardContent.delta}
+                    </span>
+                  )}
                 </div>
               )}
-            </aside>
-          </section>
 
-          <nav className="footer-nav" aria-label="Contextual workspaces">
-            <button
-              type="button"
-              onClick={() => openWorkspace("financial")}
-            >
-              Finance
-            </button>
+              <p className="text-[12px] leading-relaxed text-slate-300 mb-4 font-sans">
+                {activePlan?.cardContent?.bodyText || activePlan?.speechText}
+              </p>
 
-            <button
-              type="button"
-              onClick={() => openWorkspace("legal")}
-            >
-              Legal
-            </button>
+              {activePlan?.cardContent?.actionLabel && (
+                <button
+                  onClick={() => setIsSummoned(false)}
+                  className="w-full py-2.5 rounded-xl border border-cyan-500/40 bg-cyan-950/50 text-cyan-300 hover:bg-cyan-900/60 transition flex items-center justify-center gap-1.5 font-bold text-xs font-mono"
+                >
+                  <Activity className="w-3.5 h-3.5" /> {activePlan.cardContent.actionLabel}
+                </button>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
 
-            <button
-              type="button"
-              onClick={() => openWorkspace("security")}
-            >
-              Security
-            </button>
-          </nav>
-        </div>
-      </main>
-    </>
+      {/* BOTTOM DUAL INTERACTION: VOICE + CHAT DIRECTIVE */}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 flex flex-col sm:flex-row items-center gap-3 w-[min(92vw,620px)] justify-center">
+        <button
+          onClick={toggleVoice}
+          type="button"
+          className={`shrink-0 flex items-center gap-2 px-5 py-2.5 rounded-full border text-xs tracking-wider uppercase backdrop-blur-2xl transition duration-300 cursor-pointer shadow-lg ${voiceActive ? "border-red-500 bg-red-950/80 text-red-300 shadow-[0_0_25px_rgba(239,68,68,0.4)]" : "border-cyan-500/40 bg-[#02050c]/90 text-cyan-300 hover:border-cyan-400 hover:bg-cyan-950/70 shadow-[0_0_25px_rgba(6,182,212,0.25)]"}`}
+        >
+          {voiceActive ? <MicOff className="w-4 h-4 text-red-400 animate-pulse" /> : <Mic className="w-4 h-4 text-cyan-400" />}
+          {voiceActive ? "Mute" : "Voice"}
+        </button>
+
+        <form
+          onSubmit={handleTextSubmit}
+          className="flex-1 flex items-center w-full bg-[#02050c]/90 border border-cyan-500/40 hover:border-cyan-400/80 focus-within:border-cyan-400 rounded-full px-4 py-1.5 backdrop-blur-2xl shadow-[0_0_25px_rgba(6,182,212,0.2)] transition-all duration-300"
+        >
+          <input
+            type="text"
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            placeholder="Type directive (e.g. 'how much did i spend', 'cash 150 lunch')..."
+            className="flex-1 bg-transparent border-none outline-none text-xs text-cyan-100 placeholder-slate-500 font-mono tracking-wide px-2 py-1"
+          />
+          <button
+            type="submit"
+            className="p-1.5 rounded-full text-cyan-400 hover:text-white hover:bg-cyan-500/20 transition cursor-pointer"
+            title="Send Directive"
+          >
+            <Send className="w-3.5 h-3.5" />
+          </button>
+        </form>
+            </div>
+    </div>
   );
 }
-
-export default App;

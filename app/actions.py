@@ -25,6 +25,7 @@ Security principles:
 """
 
 from __future__ import annotations
+from app.financial_account_context import FinancialAccountContext, FinancialAccountContextError
 
 from dataclasses import dataclass
 from threading import RLock
@@ -109,6 +110,7 @@ class ActionExecutor:
         authorization_context: AuthorizationContext,
         approval_evidence: ApprovalEvidence | None = None,
         *,
+        financial_account_context: FinancialAccountContext | None = None,
         risk_evaluation: RiskEvaluation | None = None,
         step_up_evidence: StepUpEvidence | None = None,
     ) -> ExecutionResult:
@@ -401,8 +403,26 @@ class ActionExecutor:
             #      context.
             # ----------------------------------------------------------
 
+            resolved_account_id = execution_snapshot.session_id
+            if financial_account_context is not None:
+                if not isinstance(financial_account_context, FinancialAccountContext):
+                    return ExecutionResult(
+                        executed=False,
+                        reason="financial account context is invalid",
+                        action_id=action_id,
+                    )
+                try:
+                    financial_account_context.require_valid_at(event_timestamp)
+                except FinancialAccountContextError as err:
+                    return ExecutionResult(
+                        executed=False,
+                        reason=f"financial account context failed validation: {err}",
+                        action_id=action_id,
+                    )
+                resolved_account_id = str(financial_account_context.account_id)
+
             event = FinancialEvent(
-                account_id=execution_snapshot.session_id,
+                account_id=resolved_account_id,
                 source_id="ACTION_EXECUTOR",
                 source_event_id=action_id,
                 event_type=EventType.EXPENSE,

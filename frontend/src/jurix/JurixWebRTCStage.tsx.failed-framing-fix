@@ -1,0 +1,159 @@
+﻿import React, { useEffect, useRef } from "react";
+import * as THREE from "three";
+import { GLTFLoader } from "three-stdlib";
+import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
+
+export type JurixAvatarMode = "idle" | "greeting" | "listening" | "speaking";
+
+interface JurixWebRTCStageProps {
+  mode: JurixAvatarMode;
+}
+
+export const JurixWebRTCStage: React.FC<JurixWebRTCStageProps> = ({ mode }) => {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const mixerRef = useRef<THREE.AnimationMixer | null>(null);
+  const actionsRef = useRef<Record<string, THREE.AnimationAction>>({});
+  const activeActionRef = useRef<THREE.AnimationAction | null>(null);
+
+  const transitionTo = (nextName: string, duration = 0.35) => {
+    const next = actionsRef.current[nextName];
+    if (!next || activeActionRef.current === next) return;
+
+    if (activeActionRef.current) {
+      activeActionRef.current.crossFadeTo(next, duration, true);
+    }
+    next.reset().fadeIn(duration).play();
+    activeActionRef.current = next;
+  };
+
+  useEffect(() => {
+    transitionTo(mode);
+  }, [mode]);
+
+  useEffect(() => {
+    const container = mountRef.current;
+    if (!container) return;
+
+    const width = container.clientWidth || window.innerWidth;
+    const height = container.clientHeight || window.innerHeight;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 1000);
+    camera.position.set(0, 1.25, 2.2);
+    camera.lookAt(0, -0.25, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    container.innerHTML = "";
+    container.appendChild(renderer.domElement);
+
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x1e293b, 2.2);
+    scene.add(hemiLight);
+
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    keyLight.position.set(1.5, 3.5, 3);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 2.0);
+    rimLight.position.set(-2.5, 2, -2);
+    scene.add(rimLight);
+
+    const gltfLoader = new GLTFLoader();
+    const fbxLoader = new FBXLoader();
+
+    // Load authentic textured GLB
+    gltfLoader.load("/models/jurix_avatar.glb", (gltf) => {
+      const model = gltf.scene;
+
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+
+      const targetHeight = 1.8;
+      const scale = targetHeight / (size.y || 1);
+      model.scale.setScalar(scale);
+
+      model.position.x = -center.x * scale;
+      model.position.y = -box.min.y * scale - 0.2;
+      model.position.z = -center.z * scale;
+
+      scene.add(model);
+
+      const mixer = new THREE.AnimationMixer(model);
+      mixerRef.current = mixer;
+
+      const animFiles = [
+        { name: "idle", file: "/models/jurix_idle.fbx", loop: THREE.LoopRepeat },
+        { name: "greeting", file: "/models/jurix_greeting_new.fbx", loop: THREE.LoopOnce },
+        { name: "listening", file: "/models/jurix_listening.fbx", loop: THREE.LoopRepeat },
+        { name: "speaking", file: "/models/jurix_talking_new.fbx", loop: THREE.LoopRepeat },
+      ];
+
+      animFiles.forEach(({ name, file, loop }) => {
+        fbxLoader.load(file, (fbxAnim) => {
+          if (fbxAnim.animations.length > 0) {
+            const rawClip = fbxAnim.animations[0];
+            const clonedClip = rawClip.clone();
+
+            // Strip prefix to match the GLB node names
+            clonedClip.tracks.forEach((track) => {
+              track.name = track.name.replace(/mixamorig[0-9]*:_?/i, "").replace(/mixamorig:_?/i, "");
+            });
+
+            const action = mixer.clipAction(clonedClip);
+            action.setLoop(loop, 1);
+            if (loop === THREE.LoopOnce) action.clampWhenFinished = true;
+            actionsRef.current[name] = action;
+
+            if (name === "idle" && !activeActionRef.current) {
+              action.play();
+              activeActionRef.current = action;
+            } else if (mode === name) {
+              transitionTo(name);
+            }
+          }
+        });
+      });
+    });
+
+    const clock = new THREE.Clock();
+    let animId: number;
+    const animate = () => {
+      animId = requestAnimationFrame(animate);
+      if (mixerRef.current) mixerRef.current.update(clock.getDelta());
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    const handleResize = () => {
+      if (!container) return;
+      const w = container.clientWidth || window.innerWidth;
+      const h = container.clientHeight || window.innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    };
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      cancelAnimationFrame(animId);
+      renderer.dispose();
+    };
+  }, []);
+
+  return (
+    <div className="relative w-full h-full flex items-center justify-center pointer-events-none">
+      <div ref={mountRef} className="w-full h-full pointer-events-auto" />
+    </div>
+  );
+};
+
+
+
+
+

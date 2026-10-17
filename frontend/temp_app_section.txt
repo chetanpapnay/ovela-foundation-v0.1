@@ -1,0 +1,85 @@
+      setAvatarMode("idle");
+      return;
+    }
+
+    voiceActiveRef.current = true;
+    setVoiceActive(true);
+
+    voiceGatewayRef.current.start();
+  };
+
+  return (
+    <div className="relative w-screen h-screen overflow-hidden bg-[#010308] text-slate-100 font-mono select-none">
+      
+      <img aria-hidden="true" src="/images/jurix_presentation_background_v3.jpg" alt="" className="absolute inset-0 h-full w-full object-cover object-center" style={{ zIndex: 0, imageRendering: "auto" }} />
+      {/* 3D AVATAR STAGE */}
+      <div className="absolute inset-0 z-0">
+        <JurixWebRTCStage mode={avatarMode} presentationTrigger={presentationTrigger} presentationActive={presentationActive} />
+      </div>
+
+
+      {/* ON-DEMAND HOLOGRAPHIC PROJECTION (DIRECTOR-DRIVEN) */}
+      <div className="absolute inset-0 z-20 pointer-events-none">
+        <AnimatePresence>
+          {isSummoned && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.88, x: 70, rotateY: 15 }}
+              animate={{ opacity: 1, scale: 1, x: 0, rotateY: -6 }}
+              exit={{ opacity: 0, scale: 0.9, x: 50 }}
+              transition={{ type: "spring", stiffness: 130, damping: 20 }}
+              className="pointer-events-auto absolute right-6 top-10 md:right-8 md:top-8 w-[min(320px,92vw)] bg-gradient-to-b from-[#031525]/90 via-[#020b14]/95 to-[#01060c]/98 border border-cyan-400/40 rounded-2xl p-4 shadow-[0_0_45px_rgba(6,182,212,0.22)] backdrop-blur-3xl"
+              style={{ perspective: 1200 }}
+            >
+              <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-cyan-300" />
+                  <span className="text-[10px] tracking-widest text-cyan-400 font-bold">
+                    {activePlan?.hologram.title || "CAPITAL ANOMALY"}
+                  </span>
+                </div>
+                <button
+                  onClick={() => { setIsSummoned(false); setPresentationActive(false); }}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="mb-4">
+                <span className="text-3xl font-extrabold text-cyan-200 tracking-tight">₹52,100M</span>
+                <span className="text-[10px] text-emerald-400 ml-2 font-semibold">+342.8% Delta</span>
+              </div>
+
+              <p className="text-[11px] leading-relaxed text-slate-300 mb-5">
+                Verified cross-border liquidity velocity. Zero-knowledge proof committed with zero invariant drift.
+              </p>
+
+              <button
+                onClick={() => {
+                  const confirmPlan: DirectorPerformancePlan = {
+                    planId: "VERIFY_CONFIRM",
+                    totalDurationMs: 3000,
+                    speechText: "Settlement verification confirmed. Cryptographic state locked.",
+                    postureSequence: [],
+                    hologram: { title: "SETTLED", metrics: [], series: [] }
+                  };
+                  speakPlan(confirmPlan);
+                }}
+                className="w-full py-2.5 rounded-xl border border-cyan-500/40 bg-cyan-950/50 text-cyan-300 hover:bg-cyan-900/60 transition flex items-center justify-center gap-1.5 font-bold text-xs"
+              >
+                <Activity className="w-3.5 h-3.5" /> VERIFY SETTLEMENT
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => {
+          setIsSummoned(true);
+          setPresentationActive(true);
+          setPresentationTrigger((n) => n + 1);
+        }}
+        className="absolute bottom-6 left-6 z-30 pointer-events-auto rounded-lg border border-cyan-300/50 bg-slate-950/80 px-4 py-3 text-xs font-semibold tracking-widest text-cyan-200 shadow-lg hover:bg-cyan-950/80"
+      >

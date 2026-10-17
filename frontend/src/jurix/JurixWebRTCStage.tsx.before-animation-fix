@@ -1,0 +1,200 @@
+﻿import React, { useEffect, useRef } from "react";
+import * as THREE from "three";
+import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
+
+export type JurixAvatarMode = "idle" | "greeting" | "listening" | "speaking";
+
+interface JurixWebRTCStageProps {
+  mode: JurixAvatarMode;
+}
+
+export const JurixWebRTCStage: React.FC<JurixWebRTCStageProps> = ({ mode }) => {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const modeRef = useRef<JurixAvatarMode>(mode);
+
+  modeRef.current = mode;
+
+  useEffect(() => {
+    const container = mountRef.current;
+    if (!container) return;
+
+    let disposed = false;
+    let animId = 0;
+    let mixer: THREE.AnimationMixer | null = null;
+    let activeAction: THREE.AnimationAction | null = null;
+
+    const actions: Record<string, THREE.AnimationAction> = {};
+    const clock = new THREE.Clock();
+
+    const width = container.clientWidth || window.innerWidth;
+    const height = container.clientHeight || window.innerHeight;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 1000);
+    camera.position.set(0, 1.0, 3.6);
+    camera.lookAt(0, 0.8, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(1);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    container.innerHTML = "";
+    container.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x1e293b, 2.2));
+
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    keyLight.position.set(1.5, 3.5, 3);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 2.0);
+    rimLight.position.set(-2.5, 2, -2);
+    scene.add(rimLight);
+
+    const fbxLoader = new FBXLoader();
+
+    const playMode = (name: string, duration = 0.35) => {
+      const next = actions[name];
+      if (!next || activeAction === next) return;
+
+      if (activeAction) {
+        activeAction.crossFadeTo(next, duration, true);
+      }
+
+      next.reset().fadeIn(duration).play();
+      activeAction = next;
+    };
+
+    fbxLoader.load(
+      "/models/jurix_v2_standing_idle.fbx",
+      (model) => {
+        if (disposed) return;
+
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+
+        const scale = 1.8 / (size.y || 1);
+        model.scale.setScalar(scale);
+        model.position.set(
+          -center.x * scale,
+          -box.min.y * scale - 0.2,
+          -center.z * scale
+        );
+
+        model.traverse((obj) => {
+          if ((obj as THREE.SkinnedMesh).isSkinnedMesh) {
+            const skinned = obj as THREE.SkinnedMesh;
+            console.log(
+              "JURIX RIG BONES:",
+              skinned.skeleton.bones.map((bone) => bone.name)
+            );
+          }
+        });
+
+        scene.add(model);
+        mixer = new THREE.AnimationMixer(model);
+
+        // Use the standing-idle animation included in the downloaded FBX.
+        if (model.animations.length > 0) {
+          const idleClip = model.animations[0];
+          const idle = mixer.clipAction(idleClip);
+          idle.setLoop(THREE.LoopRepeat, Infinity);
+          actions.idle = idle;
+          idle.play();
+          activeAction = idle;
+          console.log("JURIX EMBEDDED ANIMATION:", idleClip.name);
+        } else {
+          console.warn("The downloaded FBX contains no embedded animation.");
+        }
+
+        const extraAnimations = [
+          { name: "greeting", file: "/models/jurix_greeting_new.fbx", loop: THREE.LoopOnce },
+          { name: "listening", file: "/models/jurix_listening.fbx", loop: THREE.LoopRepeat },
+          { name: "speaking", file: "/models/jurix_talking_new.fbx", loop: THREE.LoopRepeat },
+        ];
+
+        extraAnimations.forEach(({ name, file, loop }) => {
+          fbxLoader.load(
+            file,
+            (animationFbx) => {
+              if (disposed || !mixer || animationFbx.animations.length === 0) return;
+
+              const clip = animationFbx.animations[0].clone();
+              const action = mixer.clipAction(clip);
+              action.setLoop(loop, loop === THREE.LoopOnce ? 1 : Infinity);
+
+              if (loop === THREE.LoopOnce) {
+                action.clampWhenFinished = true;
+              }
+
+              actions[name] = action;
+              console.log("JURIX ANIMATION LOADED:", name, clip.name);
+
+              if (modeRef.current === name) {
+                playMode(name);
+              }
+            },
+            undefined,
+            (error) => console.error("Failed to load animation:", file, error)
+          );
+        });
+
+        if (modeRef.current !== "idle" && actions[modeRef.current]) {
+          playMode(modeRef.current);
+        }
+      },
+      undefined,
+      (error) => console.error("Failed to load Jurix FBX model:", error)
+    );
+
+    let lastFrameTime = 0;
+    const frameInterval = 1000 / 30;
+
+    const animate = (timestamp: number) => {
+      if (disposed) return;
+      animId = requestAnimationFrame(animate);
+
+      if (timestamp - lastFrameTime < frameInterval) return;
+
+      const delta = Math.min(clock.getDelta(), 0.05);
+      lastFrameTime = timestamp;
+      mixer?.update(delta);
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    const handleResize = () => {
+      const w = container.clientWidth || window.innerWidth;
+      const h = container.clientHeight || window.innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    };
+
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener("resize", handleResize);
+      cancelAnimationFrame(animId);
+      mixer?.stopAllAction();
+      renderer.dispose();
+      renderer.domElement.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    // Animation changes are handled as each action becomes available.
+  }, [mode]);
+
+  return (
+    <div className="relative w-full h-full flex items-center justify-center pointer-events-none">
+      <div ref={mountRef} className="w-full h-full pointer-events-auto" />
+    </div>
+  );
+};
+

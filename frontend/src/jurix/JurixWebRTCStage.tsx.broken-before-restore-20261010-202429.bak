@@ -1,0 +1,160 @@
+﻿    const projectorBeam = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.42, 0.045, 1.05, 20, 1, true), holoGlass
+    );
+    projectorBeam.name = "ProjectorBeam";
+    projectorBeam.position.y = 0.78;
+    holoProjector.add(projectorBeam);
+
+    const holoPanel = new THREE.Group();
+    holoPanel.name = "JurixHolographicDisplay";
+    holoPanel.position.set(0, 1.48, 0);
+    holoProjector.add(holoPanel);
+
+    const panelGlass = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.22, 0.78),
+      new THREE.MeshBasicMaterial({
+        color: 0x0a4b68, transparent: true, opacity: 0.20,
+        side: THREE.DoubleSide, depthWrite: false,
+      })
+    );
+    holoPanel.add(panelGlass);
+
+    const panelFrame = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(1.24, 0.80, 0.015)),
+      new THREE.LineBasicMaterial({
+        color: 0x42eaff, transparent: true, opacity: 0.9,
+      })
+    );
+    holoPanel.add(panelFrame);
+
+    // Temporary example bars; they are not yet connected to live answer data.
+    [0.22, 0.38, 0.30, 0.53, 0.44, 0.62].forEach((barHeight, index) => {
+      const bar = new THREE.Mesh(
+        new THREE.BoxGeometry(0.095, barHeight, 0.018),
+        new THREE.MeshBasicMaterial({
+          color: index === 5 ? 0x9af7ff : 0x26c9ef,
+          transparent: true, opacity: 0.9,
+        })
+      );
+      bar.position.set(-0.43 + index * 0.17, -0.25 + barHeight / 2, 0.015);
+      holoPanel.add(bar);
+    });
+
+    const projectorLight = new THREE.PointLight(0x27dfff, 1.1, 2.4);
+    projectorLight.position.y = 0.35;
+    holoProjector.add(projectorLight);
+
+    const fbxLoader = new FBXLoader();
+
+    const playMode = (requestedMode: JurixAvatarMode, duration = 0.35) => {
+      const actionName = requestedMode === "speaking" ? "talking" : requestedMode;
+      const next = actions[actionName];
+      if (!next || activeAction === next) return;
+      if (activeAction) activeAction.crossFadeTo(next, duration, true);
+      next.reset().fadeIn(duration).play();
+      activeAction = next;
+      console.log("JURIX MODE:", requestedMode, "->", actionName);
+    };
+    playModeRef.current = (requestedMode) => playMode(requestedMode);
+
+    fbxLoader.load(
+      "/models/jurix_original_rigged_v1.fbx",
+      (model) => {
+        if (disposed) return;
+        model.name = "JurixOriginalRigged";
+        model.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          materials.forEach((material) => {
+            if (material instanceof THREE.MeshStandardMaterial) {
+              material.roughness = Math.max(material.roughness, 0.82);
+              material.metalness = Math.min(material.metalness, 0.06);
+              material.needsUpdate = true;
+            }
+          });
+          const skinned = obj as THREE.SkinnedMesh;
+          if (skinned.isSkinnedMesh) {
+            console.log("JURIX RIG BONES:", skinned.skeleton.bones.map((bone) => bone.name));
+          }
+        });
+
+        model.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const scale = 1.8 / (size.y || 1);
+        model.scale.setScalar(scale);
+        model.position.set(-center.x * scale, -box.min.y * scale - 0.2, -center.z * scale);
+        scene.add(model);
+
+        mixer = new THREE.AnimationMixer(model);
+        const animationFiles = [
+          { name: "idle", file: "/models/jurix_idle_v1.fbx", loop: THREE.LoopRepeat },
+          { name: "greeting", file: "/models/jurix_greeting_v1.fbx", loop: THREE.LoopOnce },
+          { name: "listening", file: "/models/jurix_listening_v1.fbx", loop: THREE.LoopRepeat },
+          { name: "talking", file: "/models/jurix_talking_v1.fbx", loop: THREE.LoopRepeat },
+        ] as const;
+
+        mixer.addEventListener("finished", (event) => {
+          if (event.action === actions.greeting && !disposed) playMode("idle");
+        });
+
+        animationFiles.forEach(({ name, file, loop }) => {
+          fbxLoader.load(file, (animationFbx) => {
+            if (disposed || !mixer) return;
+            if (animationFbx.animations.length === 0) {
+              console.error("No animation clip found in:", file);
+              return;
+            }
+            const clip = animationFbx.animations[0].clone();
+            const action = mixer.clipAction(clip);
+            action.setLoop(loop, loop === THREE.LoopOnce ? 1 : Infinity);
+            if (loop === THREE.LoopOnce) action.clampWhenFinished = false;
+            actions[name] = action;
+            console.log("JURIX ANIMATION LOADED:", name, clip.name, "tracks:", clip.tracks.length);
+            if (
+              name === "idle" ||
+              modeRef.current === name ||
+              (modeRef.current === "speaking" && name === "talking")
+            ) playMode(modeRef.current);
+          }, undefined, (error) => console.error("Failed to load Jurix animation:", file, error));
+        });
+      },
+      undefined,
+      (error) => console.error("Failed to load Jurix original rigged FBX:", error)
+    );
+
+    let lastFrameTime = 0;
+    const frameInterval = 1000 / 30;
+    const animate = (timestamp: number) => {
+      if (disposed) return;
+      animId = requestAnimationFrame(animate);
+      if (timestamp - lastFrameTime < frameInterval) return;
+      const delta = Math.min(clock.getDelta(), 0.05);
+      lastFrameTime = timestamp;
+      mixer?.update(delta);
+      holoPanel.position.y = 1.48 + Math.sin(timestamp * 0.0015) * 0.012;
+      holoGlass.opacity = 0.075 + (Math.sin(timestamp * 0.002) + 1) * 0.012;
+      renderer.render(scene, camera);
+    };
+    animId = requestAnimationFrame(animate);
+
+    const handleResize = () => {
+      const { width: w, height: h } = getSize();
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    };
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener("resize", handleResize);
+      cancelAnimationFrame(animId);
+      mixer?.stopAllAction();
+      scene.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (mesh.isMesh) {

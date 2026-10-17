@@ -1,0 +1,128 @@
+﻿          if (disposed) return;
+          normalizeAndAddAvatar(model, "JurixRiggedFallback");
+          mixer = new THREE.AnimationMixer(model);
+
+          const animationFiles = [
+            { name: "idle", file: "/models/jurix_idle_v1.fbx", loop: THREE.LoopRepeat },
+            { name: "greeting", file: "/models/jurix_greeting_v1.fbx", loop: THREE.LoopOnce },
+            { name: "listening", file: "/models/jurix_listening_v1.fbx", loop: THREE.LoopRepeat },
+            { name: "talking", file: "/models/jurix_talking_v1.fbx", loop: THREE.LoopRepeat },
+          ] as const;
+
+          mixer.addEventListener("finished", (event) => {
+            if (event.action === actions.greeting && !disposed) playMode("idle");
+          });
+
+          animationFiles.forEach(({ name, file, loop }) => {
+            fbxLoader.load(
+              file,
+              (animationFbx) => {
+                if (disposed || !mixer) return;
+                if (!animationFbx.animations.length) {
+                  console.error("No animation clip found:", file);
+                  return;
+                }
+                const clip = animationFbx.animations[0].clone();
+                const action = mixer.clipAction(clip);
+                action.setLoop(loop, loop === THREE.LoopOnce ? 1 : Infinity);
+                if (loop === THREE.LoopOnce) action.clampWhenFinished = false;
+                actions[name] = action;
+                if (
+                  name === "idle" ||
+                  modeRef.current === name ||
+                  (modeRef.current === "speaking" && name === "talking")
+                ) {
+                  playMode(modeRef.current);
+                }
+              },
+              undefined,
+              (error) => console.error("Failed to load fallback animation:", file, error)
+            );
+          });
+        },
+        undefined,
+        (error) => console.error("Failed to load fallback avatar:", error)
+      );
+    };
+
+    // The chosen Sandbox model is the primary visual. It is static because its GLB has no rig.
+    new GLTFLoader().load(
+      PREFERRED_MODEL,
+      (gltf) => {
+        if (disposed) return;
+        normalizeAndAddAvatar(gltf.scene, "JurixPreferredBaseBasicPBR");
+        if (gltf.animations.length > 0) {
+          mixer = new THREE.AnimationMixer(gltf.scene);
+          gltf.animations.forEach((clip) => {
+            const action = mixer!.clipAction(clip);
+            action.setLoop(THREE.LoopRepeat, Infinity);
+            actions.idle = action;
+          });
+          playMode("idle");
+        }
+      },
+      undefined,
+      (error) => {
+        console.error("Failed to load preferred GLB avatar:", error);
+        startFbxFallback();
+      }
+    );
+
+    let lastFrameTime = 0;
+    const frameInterval = 1000 / 30;
+    const animate = (timestamp: number) => {
+      if (disposed) return;
+      animId = requestAnimationFrame(animate);
+      if (timestamp - lastFrameTime < frameInterval) return;
+
+      const delta = Math.min(clock.getDelta(), 0.05);
+      lastFrameTime = timestamp;
+      mixer?.update(delta);
+      renderer.render(scene, camera);
+    };
+    animId = requestAnimationFrame(animate);
+
+    const handleResize = () => {
+      const size = getSize();
+      camera.aspect = size.width / size.height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(size.width, size.height);
+    };
+    window.addEventListener("resize", handleResize);
+
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(handleResize)
+        : null;
+    resizeObserver?.observe(container);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener("resize", handleResize);
+      resizeObserver?.disconnect();
+      cancelAnimationFrame(animId);
+      mixer?.stopAllAction();
+      renderer.dispose();
+
+      scene.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        mesh.geometry?.dispose();
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        materials.forEach((material) => material.dispose());
+      });
+      container.replaceChildren();
+    };
+  }, []);
+
+  useEffect(() => {
+    modeRef.current = mode;
+    playModeRef.current(mode);
+  }, [mode]);
+
+  return (
+    <div className="relative flex h-full w-full items-center justify-center pointer-events-none">
+      <div ref={mountRef} className="h-full w-full pointer-events-auto" />
+    </div>
+  );
+};

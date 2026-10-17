@@ -31,6 +31,7 @@ PROTECTED = CONTEXT_NAMES | APPROVAL_NAMES
 ALLOWED = {
     "app/authorization_context.py": CONTEXT_NAMES,
     "app/approval_evidence.py": APPROVAL_NAMES,
+    "app/financial_account_context.py": {"_INTERNAL_CONTEXT_MARKER", "_INTERNAL_ISSUER_CAPABILITY"},
     "app/session_service.py": {"_issue_internal_authorization_context"},
 }
 

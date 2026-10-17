@@ -1,0 +1,290 @@
+import { useState, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Sparkles, X, Activity, Mic, MicOff, Radio } from "lucide-react";
+import { JurixWebRTCStage } from "./jurix/JurixWebRTCStage";
+import type { JurixAvatarMode } from "./jurix/JurixWebRTCStage";
+import { JurixVoiceGateway } from "./jurix/JurixVoiceGateway";
+import { JurixDirector } from "./jurix/JurixDirector";
+import type { DirectorPerformancePlan } from "./jurix/JurixDirector";
+
+export default function JurixNeuralOS() {
+  const [avatarMode, setAvatarMode] = useState<JurixAvatarMode>("idle");
+  const [transcript, setTranscript] = useState<string>("");
+  const [isSummoned, setIsSummoned] = useState(false);
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [activePlan, setActivePlan] = useState<DirectorPerformancePlan | null>(null);
+
+  const voiceGatewayRef = useRef<JurixVoiceGateway | null>(null);
+  const directorRef = useRef<JurixDirector>(new JurixDirector());
+  const voiceActiveRef = useRef(false);
+  const processVoiceDirectiveRef = useRef<(command: string) => void>(() => {});
+
+  const speakPlan = (plan: DirectorPerformancePlan, nextMode: JurixAvatarMode = "speaking") => {
+    setActivePlan(plan);
+    directorRef.current.loadPlan(plan);
+
+    // Pause recognition while Jurix speaks to reduce self-transcription.
+    voiceGatewayRef.current?.stop();
+    setAvatarMode(nextMode);
+
+    if (!("speechSynthesis" in window)) {
+      setAvatarMode("idle");
+      if (voiceActiveRef.current) {
+        setTimeout(() => voiceGatewayRef.current?.start(), 300);
+      }
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(plan.speechText);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    utterance.onstart = () => {
+      setAvatarMode(nextMode === "greeting" ? "greeting" : "speaking");
+    };
+
+    const resumeListening = () => {
+      setAvatarMode("idle");
+      if (voiceActiveRef.current) {
+        setTimeout(() => voiceGatewayRef.current?.start(), 300);
+      }
+    };
+
+    utterance.onend = resumeListening;
+    utterance.onerror = resumeListening;
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const processVoiceDirective = (command: string) => {
+    const text = command.trim().toLowerCase().replace(/[.!?,]+$/g, "").trim();
+
+    const makePlan = (
+      planId: string,
+      speechText: string,
+      title = "",
+      nextMode: JurixAvatarMode = "speaking"
+    ) => {
+      const plan: DirectorPerformancePlan = {
+        planId,
+        totalDurationMs: 3000,
+        speechText,
+        postureSequence: [
+          {
+            ptsMs: 0,
+            posture: "SEATED_DESK",
+            gaze: "CAMERA_USER",
+            gesture: "SPEAKING"
+          }
+        ],
+        hologram: { title, metrics: [], series: [] }
+      };
+
+      speakPlan(plan, nextMode);
+    };
+
+    const isGreeting =
+      /^(hi|hello|hey|good morning|good afternoon|good evening)(\s+jurix)?$/.test(text) ||
+      /^jurix$/.test(text);
+
+    if (isGreeting) {
+      makePlan(
+        "GREETING_PLAN",
+        "Hello. Jurix is online. How can I help you?",
+        "STANDBY",
+        "greeting"
+      );
+      return;
+    }
+
+    if (/\b(dismiss|close|hide|collapse)\b/.test(text)) {
+      setIsSummoned(false);
+      makePlan(
+        "DISMISS_PLAN",
+        "Closing the current projection.",
+        "STANDBY"
+      );
+      return;
+    }
+
+    if (
+      /\b(capital|anomaly|ledger|report|balance|spending|transaction|portfolio|net worth|investment|account|financial|finance)\b/.test(text)
+    ) {
+      setIsSummoned(true);
+      makePlan(
+        "FINANCIAL_DATA_UNAVAILABLE",
+        "I don't have a verified financial data source connected in this session, so I can't confirm or display live financial figures yet. I won't invent numbers.",
+        "DATA SOURCE REQUIRED"
+      );
+      return;
+    }
+
+    makePlan(
+      "GENERAL_ACK",
+      `I heard you say: ${command.trim()}. I don't have a connected conversational reasoning service in this build yet, so I can't reliably answer that question.`
+    );
+  };
+
+  useEffect(() => {
+    processVoiceDirectiveRef.current = processVoiceDirective;
+  });
+
+  useEffect(() => {
+    const gateway = new JurixVoiceGateway();
+    voiceGatewayRef.current = gateway;
+
+    gateway.setCallbacks({
+      onStateChange: (state) => {
+        if (state === "listening") {
+          setAvatarMode("listening");
+        } else if (
+          state === "idle" &&
+          (!("speechSynthesis" in window) || !window.speechSynthesis.speaking)
+        ) {
+          setAvatarMode("idle");
+        }
+      },
+      onTranscript: (userText) => {
+        setTranscript(userText);
+        processVoiceDirectiveRef.current(userText);
+      },
+      onError: (err) => {
+        console.error("Voice gateway error:", err);
+      }
+    });
+
+    return () => {
+      voiceActiveRef.current = false;
+      gateway.stop();
+      if (voiceGatewayRef.current === gateway) {
+        voiceGatewayRef.current = null;
+      }
+    };
+  }, []);
+
+  const toggleVoice = () => {
+    if (!voiceGatewayRef.current) return;
+
+    if (voiceActiveRef.current) {
+      voiceActiveRef.current = false;
+      voiceGatewayRef.current.stop();
+      setVoiceActive(false);
+      setAvatarMode("idle");
+      return;
+    }
+
+    voiceActiveRef.current = true;
+    setVoiceActive(true);
+
+    voiceGatewayRef.current.start();
+  };
+
+  return (
+    <div className="relative w-screen h-screen overflow-hidden bg-[#010308] text-slate-100 font-mono select-none">
+      
+      <video aria-hidden="true" autoPlay muted loop playsInline className="absolute inset-0 h-full w-full object-cover" style={{ zIndex: 0 }}><source src="/videos/jurix-background.mp4" type="video/mp4" /></video>
+      {/* 3D AVATAR STAGE */}
+      <div className="absolute inset-0 z-0">
+        <JurixWebRTCStage mode={avatarMode} />
+      </div>
+
+      {/* TOP STATUS BAR */}
+      <div className="absolute top-6 left-8 right-8 z-20 flex items-center justify-between pointer-events-none">
+        <div className="flex items-center gap-2">
+          <span className="px-3 py-1 rounded-full bg-[#020b14]/80 border border-cyan-500/25 text-cyan-300 text-xs backdrop-blur-md">
+            POSTURE: <strong className="text-cyan-400 uppercase">{avatarMode}</strong>
+          </span>
+          {transcript && (
+            <span className="px-3 py-1 rounded-full bg-black/60 border border-slate-700 text-slate-300 text-xs backdrop-blur-md max-w-md truncate">
+              "{transcript}"
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#020b14]/70 border border-cyan-500/25 text-cyan-300 backdrop-blur-md text-[11px]">
+            <Radio className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+            {voiceActive ? "NEURAL VOICE LINK ACTIVE" : "VOICE READY"}
+          </span>
+        </div>
+      </div>
+
+      {/* ON-DEMAND HOLOGRAPHIC PROJECTION (DIRECTOR-DRIVEN) */}
+      <div className="absolute inset-0 z-20 pointer-events-none flex items-center justify-end px-12 md:px-24">
+        <AnimatePresence>
+          {isSummoned && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.88, x: 70, rotateY: 15 }}
+              animate={{ opacity: 1, scale: 1, x: 0, rotateY: -6 }}
+              exit={{ opacity: 0, scale: 0.9, x: 50 }}
+              transition={{ type: "spring", stiffness: 130, damping: 20 }}
+              className="pointer-events-auto w-full max-w-sm bg-gradient-to-b from-[#031525]/90 via-[#020b14]/95 to-[#01060c]/98 border border-cyan-400/40 rounded-3xl p-6 shadow-[0_0_60px_rgba(6,182,212,0.28)] backdrop-blur-3xl"
+              style={{ perspective: 1200 }}
+            >
+              <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-cyan-300" />
+                  <span className="text-[10px] tracking-widest text-cyan-400 font-bold">
+                    {activePlan?.hologram.title || "CAPITAL ANOMALY"}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setIsSummoned(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="mb-4">
+                <span className="text-3xl font-extrabold text-cyan-200 tracking-tight">â‚¹52,100M</span>
+                <span className="text-[10px] text-emerald-400 ml-2 font-semibold">+342.8% Delta</span>
+              </div>
+
+              <p className="text-[11px] leading-relaxed text-slate-300 mb-5">
+                Verified cross-border liquidity velocity. Zero-knowledge proof committed with zero invariant drift.
+              </p>
+
+              <button
+                onClick={() => {
+                  const confirmPlan: DirectorPerformancePlan = {
+                    planId: "VERIFY_CONFIRM",
+                    totalDurationMs: 3000,
+                    speechText: "Settlement verification confirmed. Cryptographic state locked.",
+                    postureSequence: [],
+                    hologram: { title: "SETTLED", metrics: [], series: [] }
+                  };
+                  speakPlan(confirmPlan);
+                }}
+                className="w-full py-2.5 rounded-xl border border-cyan-500/40 bg-cyan-950/50 text-cyan-300 hover:bg-cyan-900/60 transition flex items-center justify-center gap-1.5 font-bold text-xs"
+              >
+                <Activity className="w-3.5 h-3.5" /> VERIFY SETTLEMENT
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* BOTTOM MIC ACTIVATION */}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3">
+        <button
+          onClick={toggleVoice}
+          className={`flex items-center gap-2 px-6 py-2.5 rounded-full border text-xs tracking-wider uppercase backdrop-blur-2xl transition duration-300 cursor-pointer ${
+            voiceActive
+              ? "border-red-500 bg-red-950/70 text-red-300 shadow-[0_0_25px_rgba(239,68,68,0.4)]"
+              : "border-cyan-500/40 bg-[#02050c]/85 text-cyan-300 hover:border-cyan-400 hover:bg-cyan-950/70 shadow-[0_0_25px_rgba(6,182,212,0.25)]"
+          }`}
+        >
+          {voiceActive ? <MicOff className="w-4 h-4 text-red-400 animate-pulse" /> : <Mic className="w-4 h-4 text-cyan-400" />}
+          {voiceActive ? "Disconnect Neural Voice" : "Connect Neural Voice"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+

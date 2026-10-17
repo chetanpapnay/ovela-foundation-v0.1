@@ -1,0 +1,142 @@
+export type VoiceGatewayState = "idle" | "listening" | "error";
+
+export interface VoiceGatewayCallbacks {
+  onStateChange?: (state: VoiceGatewayState) => void;
+  onTranscript?: (text: string) => void;
+  onError?: (message: string) => void;
+}
+
+// Browser Web Speech API interface declarations
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+  message?: string;
+}
+
+interface SpeechRecognitionEvent extends Event {
+  resultIndex: number;
+  results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionInstance extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+  onstart: ((this: SpeechRecognitionInstance, ev: Event) => void) | null;
+  onresult:
+    | ((this: SpeechRecognitionInstance, ev: SpeechRecognitionEvent) => void)
+    | null;
+  onerror:
+    | ((
+        this: SpeechRecognitionInstance,
+        ev: SpeechRecognitionErrorEvent
+      ) => void)
+    | null;
+  onend: ((this: SpeechRecognitionInstance, ev: Event) => void) | null;
+}
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
+
+declare global {
+  interface Window {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  }
+}
+
+export class JurixVoiceGateway {
+  private recognition: SpeechRecognitionInstance | null = null;
+  private state: VoiceGatewayState = "idle";
+  private callbacks: VoiceGatewayCallbacks = {};
+
+  constructor() {
+    const SpeechConstructor =
+      typeof window !== "undefined"
+        ? window.SpeechRecognition || window.webkitSpeechRecognition
+        : undefined;
+
+    if (SpeechConstructor) {
+      try {
+        const instance = new SpeechConstructor();
+        instance.continuous = false;
+        instance.interimResults = true;
+        instance.lang = "en-US";
+
+        instance.onstart = () => {
+          this.setState("listening");
+        };
+
+        instance.onresult = (event: SpeechRecognitionEvent) => {
+          let finalTranscript = "";
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const result = event.results[i];
+            if (result.isFinal) {
+              finalTranscript += result[0].transcript;
+            }
+          }
+          if (finalTranscript.trim()) {
+            this.callbacks.onTranscript?.(finalTranscript.trim());
+          }
+        };
+
+        instance.onerror = (event: SpeechRecognitionErrorEvent) => {
+          this.setState("error");
+          const errorMsg =
+            event.error === "not-allowed"
+              ? "Microphone access denied by browser."
+              : `Speech recognition error: ${event.error}`;
+          this.callbacks.onError?.(errorMsg);
+        };
+
+        instance.onend = () => {
+          this.setState("idle");
+        };
+
+        this.recognition = instance;
+      } catch {
+        this.recognition = null;
+      }
+    }
+  }
+
+  public setCallbacks(callbacks: VoiceGatewayCallbacks): void {
+    this.callbacks = callbacks;
+  }
+
+  public isSupported(): boolean {
+    return this.recognition !== null;
+  }
+
+  public getState(): VoiceGatewayState {
+    return this.state;
+  }
+
+  public start(): void {
+    if (!this.recognition) {
+      this.callbacks.onError?.("Speech recognition not supported in this browser.");
+      return;
+    }
+    try {
+      this.recognition.start();
+    } catch {
+      // Ignored if already started
+    }
+  }
+
+  public stop(): void {
+    if (!this.recognition) return;
+    try {
+      this.recognition.stop();
+    } catch {
+      // Ignored if already stopped
+    }
+    this.setState("idle");
+  }
+
+  private setState(state: VoiceGatewayState): void {
+    this.state = state;
+    this.callbacks.onStateChange?.(state);
+  }
+}
