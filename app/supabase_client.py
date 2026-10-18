@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-SUPABASE_DB_URI = (
-    "postgresql://postgres.gjtsivfbrqlyltmjejrt:Chetan%20197640"
-    "@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
-)
+# Database configuration for Jurix-ledger
+DB_HOST = os.getenv("SUPABASE_DB_HOST", "aws-0-ap-southeast-1.pooler.supabase.com")
+DB_PORT = int(os.getenv("SUPABASE_DB_PORT", "6543"))
+DB_NAME = os.getenv("SUPABASE_DB_NAME", "postgres")
+DB_USER = os.getenv("SUPABASE_DB_USER", "postgres.gjtsivfbrqlyltmjejrt")
+DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD", "Chetan 197640")
+
 
 def get_db_connection():
-    return psycopg2.connect(SUPABASE_DB_URI, cursor_factory=RealDictCursor)
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        sslmode="require",
+        cursor_factory=RealDictCursor,
+    )
+
 
 def fetch_recent_transactions(limit: int = 50) -> List[Dict[str, Any]]:
     query = """
@@ -40,6 +53,7 @@ def fetch_recent_transactions(limit: int = 50) -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
+
 def fetch_account_summary() -> List[Dict[str, Any]]:
     query = """
         SELECT
@@ -58,6 +72,7 @@ def fetch_account_summary() -> List[Dict[str, Any]]:
             return [dict(row) for row in records]
     finally:
         conn.close()
+
 
 def insert_financial_event(
     account_id: str,
