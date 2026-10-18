@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from typing import Any, Dict, List
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -10,7 +11,7 @@ DB_HOST = os.getenv("SUPABASE_DB_HOST", "aws-0-ap-southeast-1.pooler.supabase.co
 DB_PORT = int(os.getenv("SUPABASE_DB_PORT", "6543"))
 DB_NAME = os.getenv("SUPABASE_DB_NAME", "postgres")
 DB_USER = os.getenv("SUPABASE_DB_USER", "postgres.gjtsivfbrqlyltmjejrt")
-DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD", "Chetan 197640")
+DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD", "JurixLedger2026!")
 
 
 def get_db_connection():
@@ -23,6 +24,43 @@ def get_db_connection():
         sslmode="require",
         cursor_factory=RealDictCursor,
     )
+
+
+def _serialize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert non-JSON-serializable types like Decimal and Datetime to standard Python types."""
+    clean = {}
+    for key, value in row.items():
+        if isinstance(value, Decimal):
+            clean[key] = float(value)
+        elif hasattr(value, "isoformat"):
+            clean[key] = value.isoformat()
+        else:
+            clean[key] = value
+    return clean
+
+
+def ensure_table_exists(conn) -> None:
+    """Ensure the financial_events table exists before querying."""
+    create_table_sql = """
+        CREATE TABLE IF NOT EXISTS financial_events (
+            event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            account_id TEXT NOT NULL,
+            source_id TEXT,
+            source_event_id TEXT,
+            event_type TEXT NOT NULL,
+            amount NUMERIC(12, 2) NOT NULL,
+            currency TEXT DEFAULT 'INR',
+            direction TEXT NOT NULL,
+            merchant TEXT DEFAULT 'Unknown',
+            note TEXT,
+            event_date TIMESTAMPTZ DEFAULT NOW(),
+            recorded_at TIMESTAMPTZ DEFAULT NOW(),
+            evidence_status TEXT DEFAULT 'UNVERIFIED'
+        );
+    """
+    with conn.cursor() as cur:
+        cur.execute(create_table_sql)
+    conn.commit()
 
 
 def fetch_recent_transactions(limit: int = 50) -> List[Dict[str, Any]]:
@@ -46,10 +84,11 @@ def fetch_recent_transactions(limit: int = 50) -> List[Dict[str, Any]]:
     """
     conn = get_db_connection()
     try:
+        ensure_table_exists(conn)
         with conn.cursor() as cur:
             cur.execute(query, (limit,))
             records = cur.fetchall()
-            return [dict(row) for row in records]
+            return [_serialize_row(dict(row)) for row in records]
     finally:
         conn.close()
 
@@ -66,10 +105,11 @@ def fetch_account_summary() -> List[Dict[str, Any]]:
     """
     conn = get_db_connection()
     try:
+        ensure_table_exists(conn)
         with conn.cursor() as cur:
             cur.execute(query)
             records = cur.fetchall()
-            return [dict(row) for row in records]
+            return [_serialize_row(dict(row)) for row in records]
     finally:
         conn.close()
 
@@ -108,6 +148,7 @@ def insert_financial_event(
     """
     conn = get_db_connection()
     try:
+        ensure_table_exists(conn)
         with conn.cursor() as cur:
             cur.execute(insert_sql, (
                 account_id,
@@ -122,6 +163,6 @@ def insert_financial_event(
             ))
             inserted = cur.fetchone()
             conn.commit()
-            return dict(inserted)
+            return _serialize_row(dict(inserted)) if inserted else {}
     finally:
         conn.close()
