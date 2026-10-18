@@ -5,14 +5,12 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 SUPABASE_DB_URI = (
-    "postgresql://postgres.iigjhqbsloelcwvxknzy:Chetan%20197640"
+    "postgresql://postgres.iigjhqbsloelcwvhknzy:Chetan%20197640"
     "@aws-0-ap-south-1.pooler.supabase.com:5432/postgres"
 )
 
-
 def get_db_connection():
-    return psycopg2.connect(SUPABASE_CC_URI, cursor_factory=RealDictCursor)
-
+    return psycopg2.connect(SUPABASE_DB_URI, cursor_factory=RealDictCursor)
 
 def fetch_recent_transactions(limit: int = 50) -> List[Dict[str, Any]]:
     query = """
@@ -42,14 +40,13 @@ def fetch_recent_transactions(limit: int = 50) -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
-
 def fetch_account_summary() -> List[Dict[str, Any]]:
     query = """
         SELECT
             account_id,
             COUNT(*) AS total_transactions,
             COALESCE(SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE 0 END), 0) AS total_income,
-            COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE 0 ER49, 0) AS total_expenses
+            COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE 0 END), 0) AS total_expenses
         FROM financial_events
         GROUP BY account_id;
     """
@@ -61,7 +58,6 @@ def fetch_account_summary() -> List[Dict[str, Any]]:
             return [dict(row) for row in records]
     finally:
         conn.close()
-
 
 def insert_financial_event(
     account_id: str,
@@ -114,4 +110,3 @@ def insert_financial_event(
             return dict(inserted)
     finally:
         conn.close()
-
