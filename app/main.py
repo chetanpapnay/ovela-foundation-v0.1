@@ -9,14 +9,19 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 from starlette.types import Receive, Scope, Send
 
 from .http.api import ApiConfig, OvelaApi
+from .ingest_router import register_ingest_endpoints
 from .ledger import AppendOnlyLedger, LedgerConflict
 from .models import ActionRequest, FinancialEvent
 from .runtime import OvelaRuntime
-from .ingest_router import register_ingest_endpoints
-from .supabase_client import fetch_recent_transactions, fetch_account_summary
+from .supabase_client import (
+    fetch_account_summary,
+    fetch_recent_transactions,
+    insert_financial_event,
+)
 
 
 APP_VERSION = "0.1.1"
@@ -27,13 +32,20 @@ _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 
 
-def _apply_security_headers(response: Any) -> None:
-    """Apply the Ovela security response-header policy.
+class FinancialEventCreate(BaseModel):
+    account_id: str
+    source_id: str = "RENDER_CLI"
+    source_event_id: str
+    event_type: str = "EXPENSE"
+    amount: float = Field(..., gt=0)
+    currency: str = "INR"
+    direction: str = "DEBIT"
+    merchant: str = "Unknown"
+    note: str = ""
 
-    This helper is shared by normal application responses and by the
-    request-size middleware's early rejection responses so that security
-    failures do not accidentally receive weaker headers.
-    """
+
+def _apply_security_headers(response: Any) -> None:
+    """Apply the Ovela security response-header policy."""
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -52,18 +64,7 @@ def _apply_security_headers(response: Any) -> None:
 
 
 class RequestSizeLimitMiddleware:
-    """Enforce a hard maximum HTTP request-body size.
-
-    Security properties:
-    - Rejects declared bodies larger than the limit before buffering them.
-    - Handles chunked bodies without buffering an unbounded request.
-    - Buffers at most MAX_REQUEST_BODY_BYTES plus one detected overflow
-      chunk before rejecting the request.
-    - Replays accepted request messages unchanged to the application.
-    - Does not apply request-body parsing rules to non-HTTP scopes.
-    - Applies the same security response headers to early rejection
-      responses as the normal application response path.
-    """
+    """Enforce a hard maximum HTTP request-body size."""
 
     def __init__(self, app: Any):
         self.app = app
@@ -318,7 +319,7 @@ def create_application(
             detail="trusted authorization context is unavailable",
         )
 
-    # Initialize runtime and mount OvelaApi ASGI application
+    # Mount OvelaApi ASGI application
     app_runtime = runtime if runtime is not None else OvelaRuntime()
     ovela_api = OvelaApi(
         runtime=app_runtime,
@@ -330,6 +331,23 @@ def create_application(
     def get_live_transactions(limit: int = 50) -> Any:
         try:
             return fetch_recent_transactions(limit=limit)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app_instance.post("/api/transactions", status_code=201)
+    def create_live_transaction(payload: FinancialEventCreate) -> Any:
+        try:
+            return insert_financial_event(
+                account_id=payload.account_id,
+                source_id=payload.source_id,
+                source_event_id=payload.source_event_id,
+                event_type=payload.event_type,
+                amount=payload.amount,
+                currency=payload.currency,
+                direction=payload.direction,
+                merchant=payload.merchant,
+                note=payload.note,
+            )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
