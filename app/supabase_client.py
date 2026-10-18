@@ -6,7 +6,7 @@ from psycopg2.extras import RealDictCursor
 
 SUPABASE_DB_URI = (
     "postgresql://postgres.iigjhqbsloelcwvhknzy:Chetan%20197640"
-    "@aws-0-ap-south-1.pooler.supabase.com:5432/postgres"
+    "@aws-0-ap-south-1.pooler.supabase.com:6543/postgres"
 )
 
 def get_db_connection():
