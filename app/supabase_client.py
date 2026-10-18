@@ -5,8 +5,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 SUPABASE_DB_URI = (
-    "postgresql://postgres.iigjhqbsloelcwvhknzy:Chetan%20197640"
-    "@aws-0-ap-south-1.pooler.supabase.com:6543/postgres"
+    "postgresql://postgres.gjtsivfbrqlyltmjejrt:Chetan%20197640"
+    "@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
 )
 
 def get_db_connection():
