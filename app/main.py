@@ -29,7 +29,7 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
@@ -65,7 +65,6 @@ def fetch_live_gold_price(symbol: str, fallback: float = 132.34) -> float:
 
 
 def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
-    # Extract only YYYY-MM-DD in case a timestamp string is returned from postgres
     clean_dob = str(dob_str).split("T")[0].strip()
     birth_date = date.fromisoformat(clean_dob)
     today = date.today()
@@ -246,46 +245,52 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
             data = jurix_tool_ground_truth()
             q = req.message.lower().strip()
 
-            if any(w in q for w in ["age", "old", "dob", "birth"]):
-                age = data["dynamic_age"]
-                reply = f"Chetan, as of today ({age['as_of_date']}), your exact age is {age['formatted_age']} (born {age['dob']})."
-            
-            elif any(w in q for w in ["net worth", "total worth", "wealth", "balance"]):
-                reply = (
-                    f"Your total net worth is ₹{data['net_worth_inr']:,}.\n"
-                    f"• Liquid Bank Accounts: ₹{data['total_bank_cash']:,}\n"
-                    f"• Offline Cash in Hand: ₹{data['offline_cash']:,}\n"
-                    f"• Live Investment Portfolio: ₹{data['investments_summary']['total_current_market_value']:,} "
-                    f"(Unrealized P&L: ₹{data['investments_summary']['total_unrealized_profit']:,})"
-                )
-
-            elif any(w in q for w in ["gold", "mf", "mutual fund", "groww", "etf", "invest"]):
+            # 1. Investment & Portfolio Intent (Checked first to avoid age/profile false triggers)
+            if any(w in q for w in ["gold", "mf", "mutual fund", "groww", "etf", "invest", "portfolio", "performing", "p&l", "profit", "shares"]):
                 inv_lines = []
                 for item in data["investments"]:
                     inv_lines.append(
-                        f"• {item['name']}: {item['units']} units | Invested: ₹{item['invested']} | "
-                        f"Current Value: ₹{item['current_value']} (P&L: ₹{item['profit']})"
+                        f"- {item['name']}: {item['units']} units | Invested: Rs {item['invested']:,} | "
+                        f"Current Value: Rs {item['current_value']:,} (Unrealized P&L: Rs {item['profit']:,})"
                     )
                 reply = (
-                    f"Your investment portfolio on Groww is currently valued at ₹{data['investments_summary']['total_current_market_value']:,} "
-                    f"(Total Invested: ₹{data['investments_summary']['total_invested']:,}, Net P&L: ₹{data['investments_summary']['total_unrealized_profit']:,}):\n"
-                    + "\n".join(inv_lines)
+                    f"Your investment portfolio on Groww is currently valued at Rs {data['investments_summary']['total_current_market_value']:,}.\n"
+                    f"Total Capital Invested: Rs {data['investments_summary']['total_invested']:,}\n"
+                    f"Net Unrealized Profit: Rs {data['investments_summary']['total_unrealized_profit']:,}\n\n"
+                    f"Asset Breakdown:\n" + "\n".join(inv_lines)
                 )
 
-            elif any(w in q for w in ["kotak", "bank", "cash", "offline"]):
+            # 2. Net Worth Intent
+            elif any(w in q for w in ["net worth", "total worth", "wealth", "overall balance", "total asset"]):
+                reply = (
+                    f"Your total net worth is Rs {data['net_worth_inr']:,}.\n"
+                    f"- Liquid Bank Accounts: Rs {data['total_bank_cash']:,}\n"
+                    f"- Offline Cash in Hand: Rs {data['offline_cash']:,}\n"
+                    f"- Live Investment Portfolio: Rs {data['investments_summary']['total_current_market_value']:,} "
+                    f"(Unrealized P&L: Rs {data['investments_summary']['total_unrealized_profit']:,})"
+                )
+
+            # 3. Bank & Cash Breakdown Intent
+            elif any(w in q for w in ["kotak", "bank", "cash", "offline", "liquid"]):
                 reply = (
                     f"Liquid Cash Breakdown:\n"
-                    f"• Kotak Bank Account: ₹{data['liquid_bank_balances'].get('KOTAK_BANK', 0.0):,}\n"
-                    f"• Offline Cash in Hand: ₹{data['offline_cash']:,}\n"
-                    f"Total Liquid Reserves: ₹{data['total_bank_cash'] + data['offline_cash']:,}"
+                    f"- Kotak Bank Account: Rs {data['liquid_bank_balances'].get('KOTAK_BANK', 0.0):,}\n"
+                    f"- Offline Cash in Hand: Rs {data['offline_cash']:,}\n"
+                    f"Total Available Liquid Reserves: Rs {data['total_bank_cash'] + data['offline_cash']:,}"
                 )
 
+            # 4. Identity & Dynamic Age Intent
+            elif any(w in q for w in ["age", "old", "dob", "birth", "birthday"]):
+                age = data["dynamic_age"]
+                reply = f"Chetan, as of today ({age['as_of_date']}), your exact age is {age['formatted_age']} (born {age['dob']})."
+
+            # 5. Fallback Prompt
             else:
                 reply = (
                     f"Hello Chetan. I am Jurix, connected directly to your ledger and portfolio.\n"
-                    f"• Current Net Worth: ₹{data['net_worth_inr']:,}\n"
-                    f"• Age: {data['dynamic_age']['formatted_age']}\n"
-                    f"Ask me anything about your bank balance, Groww holdings, or cash reserves."
+                    f"- Current Net Worth: Rs {data['net_worth_inr']:,}\n"
+                    f"- Age: {data['dynamic_age']['formatted_age']}\n"
+                    f"You can ask me about your investments, net worth, bank balances, or transactions."
                 )
 
             return {
