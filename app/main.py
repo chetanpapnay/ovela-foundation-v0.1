@@ -2,6 +2,8 @@
 
 import hmac
 import os
+import re
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,11 @@ class FinancialEventCreate(BaseModel):
     direction: str = "DEBIT"
     merchant: str = "Unknown"
     note: str = ""
+
+
+class RawSmsPayload(BaseModel):
+    message: str
+    account_id: str = "PRIMARY-ACC"
 
 
 def _apply_security_headers(response: Any) -> None:
@@ -347,6 +354,47 @@ def create_application(
                 direction=payload.direction,
                 merchant=payload.merchant,
                 note=payload.note,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @app_instance.post("/api/ingest/sms", status_code=201)
+    def auto_ingest_sms(payload: RawSmsPayload) -> Any:
+        """Parse raw bank SMS notifications and commit directly to Supabase."""
+        text = payload.message
+
+        # 1. Regex to extract numeric amount (supports Rs., INR, with or without decimals/commas)
+        amt_match = re.search(r"(?:Rs\.?|INR)\s*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
+        if not amt_match:
+            raise HTTPException(status_code=400, detail="No currency or amount detected in message")
+        amount = float(amt_match.group(1).replace(",", ""))
+
+        # 2. Identify transaction direction and event category
+        is_debit = bool(re.search(r"\b(debited|spent|sent|paid|withdrawn|purchase)\b", text, re.IGNORECASE))
+        direction = "DEBIT" if is_debit else "CREDIT"
+        event_type = "EXPENSE" if is_debit else "INCOME"
+
+        # 3. Extract beneficiary or merchant
+        merchant_match = re.search(
+            r"(?:to|at|info|vpa|transferred to)\s+([A-Za-z0-9\s\.\-_]+?)(?=\s+(?:on|ref|via|avl|bal|upi|dated)|\.|$)",
+            text,
+            re.IGNORECASE,
+        )
+        merchant = merchant_match.group(1).strip() if merchant_match else "Unknown"
+
+        # 4. Save parsed record directly to Supabase
+        timestamp_id = int(datetime.utcnow().timestamp())
+        try:
+            return insert_financial_event(
+                account_id=payload.account_id,
+                source_id="PHONE_SMS_AUTO",
+                source_event_id=f"AUTO-{timestamp_id}",
+                event_type=event_type,
+                amount=amount,
+                currency="INR",
+                direction=direction,
+                merchant=merchant,
+                note=text[:150],
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
