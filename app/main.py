@@ -3,7 +3,7 @@
 import hmac
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -25,12 +25,58 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.2"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
 
 MAX_REQUEST_BODY_BYTES = 256 * 1024
+
+
+# --- USER PROFILE & NET WORTH CONFIGURATION ---
+USER_PROFILE = {
+    "name": "Chetan Papnay",
+    "dob": "2006-01-01",  # Placeholder: Updated when you share your exact details
+    "base_currency": "INR",
+    "assets": {
+        "offline_cash": 0.0,
+        "mutual_funds": 0.0,
+        "gold": 0.0,
+        "fixed_deposits": 0.0,
+        "crypto": 0.0,
+    }
+}
+
+
+def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
+    """Calculates age in years, months, and days dynamically without third-party libraries."""
+    birth_date = date.fromisoformat(dob_str)
+    today = date.today()
+
+    years = today.year - birth_date.year
+    months = today.month - birth_date.month
+    days = today.day - birth_date.day
+
+    if days < 0:
+        months -= 1
+        # Previous month day count approximation
+        prev_month = 12 if today.month == 1 else today.month - 1
+        year_for_month = today.year - 1 if today.month == 1 else today.year
+        days_in_prev_month = (date(year_for_month, prev_month % 12 + 1, 1) - date(year_for_month, prev_month, 1)).days if prev_month != 12 else 31
+        days += days_in_prev_month
+
+    if months < 0:
+        years -= 1
+        months += 12
+
+    return {
+        "dob": dob_str,
+        "as_of_date": today.isoformat(),
+        "years": years,
+        "months": months,
+        "days": days,
+        "formatted_age": f"{years} years, {months} months, {days} days"
+    }
 
 
 class FinancialEventCreate(BaseModel):
@@ -267,6 +313,44 @@ def create_application(
             "kernel": "active",
         }
 
+    @app_instance.get("/api/profile")
+    def get_profile() -> Any:
+        age_data = calculate_dynamic_age(USER_PROFILE["dob"])
+        return {
+            "name": USER_PROFILE["name"],
+            "dob": USER_PROFILE["dob"],
+            "dynamic_age": age_data,
+            "base_currency": USER_PROFILE["base_currency"],
+        }
+
+    @app_instance.get("/api/networth")
+    def get_networth() -> Any:
+        summary = fetch_account_summary()
+        online_liquid = 0.0
+        for item in summary:
+            inc = float(item.get("total_income", 0.0))
+            exp = float(item.get("total_expenses", 0.0))
+            online_liquid += (inc - exp)
+
+        offline_cash = float(USER_PROFILE["assets"]["offline_cash"])
+        mutual_funds = float(USER_PROFILE["assets"]["mutual_funds"])
+        gold = float(USER_PROFILE["assets"]["gold"])
+        fixed_deposits = float(USER_PROFILE["assets"]["fixed_deposits"])
+
+        total_net_worth = online_liquid + offline_cash + mutual_funds + gold + fixed_deposits
+
+        return {
+            "net_worth_inr": round(total_net_worth, 2),
+            "breakdown": {
+                "liquid_online_cash": round(online_liquid, 2),
+                "offline_cash_in_hand": round(offline_cash, 2),
+                "mutual_funds": round(mutual_funds, 2),
+                "gold": round(gold, 2),
+                "fixed_deposits": round(fixed_deposits, 2),
+            },
+            "bank_accounts": summary,
+        }
+
     @app_instance.post("/internal/events", response_model=FinancialEvent, status_code=201)
     def append_event(
         event: FinancialEvent,
@@ -326,17 +410,14 @@ def create_application(
 
     @app_instance.post("/api/ingest/sms", status_code=201)
     def auto_ingest_sms(payload: RawSmsPayload) -> Any:
-        """Parse bank/UPI SMS/Notifications and save directly to Supabase."""
         text = payload.message
         upper = text.upper()
 
-        # 1. Extract Amount (Supports Rs, INR, ₹, with or without commas/decimals)
         amt_match = re.search(r"(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
         if not amt_match:
             raise HTTPException(status_code=400, detail="No currency or amount detected in message")
         amount = float(amt_match.group(1).replace(",", ""))
 
-        # 2. Identify Direction & Event Category
         is_debit = bool(
             re.search(
                 r"\b(debited|spent|sent|paid|withdrawn|purchase|transferred to|deducted)\b",
@@ -347,7 +428,6 @@ def create_application(
         direction = "DEBIT" if is_debit else "CREDIT"
         event_type = "EXPENSE" if is_debit else "INCOME"
 
-        # 3. Dynamic Account Identification (Navi, GPay, Kotak, BOB, HDFC, SBI, ICICI, Axis, PNB, etc.)
         account_id = payload.account_id
         if account_id == "AUTO_DETECT":
             if "NAVI" in upper:
@@ -373,11 +453,7 @@ def create_application(
             else:
                 account_id = "PRIMARY_UPI_ACCOUNT"
 
-        # 4. Beneficiary / Merchant / VPA Extraction
-        # Case A: Explicit UPI VPA Handle (e.g., store@okaxis, xyz@navi, shop@kotak)
         vpa_match = re.search(r"\b([a-zA-Z0-9.\-_]{2,35}@[a-zA-Z]{2,15})\b", text)
-
-        # Case B: Standard narrative keywords
         merchant_match = re.search(
             r"(?:to|at|info|vpa|transferred to|paid to|remitter\s*(?:name)?[:\s]+)\s+([A-Za-z0-9\s\.\-_&]+?)(?=\s+(?:on|ref|via|avl|bal|upi|dated|from|for)|\.|$)",
             text,
@@ -388,13 +464,11 @@ def create_application(
             merchant = vpa_match.group(1).strip()
         elif merchant_match:
             candidate = merchant_match.group(1).strip()
-            # Clean common filler prefixes
             candidate = re.sub(r"^(vpa|info|mr\.|ms\.)\s+", "", candidate, flags=re.IGNORECASE).strip()
             merchant = candidate if len(candidate) >= 2 else "Unknown"
         else:
             merchant = "UPI Transaction"
 
-        # 5. Insert to Supabase
         timestamp_id = int(datetime.utcnow().timestamp())
         try:
             return insert_financial_event(
