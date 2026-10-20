@@ -25,20 +25,19 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
 
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 
-# --- USER PROFILE & PORTFOLIO ENGINE ---
 USER_PROFILE = {
     "name": "Chetan Papnay",
     "dob": "2006-03-04",
     "base_currency": "INR",
     "opening_balances": {
-        "KOTAK_BANK": 1662.76  # 3162.76 current balance minus the 1500 already in ledger
+        "KOTAK_BANK": 1662.76
     },
     "portfolio": {
         "offline_cash": 3500.0,
@@ -63,7 +62,6 @@ USER_PROFILE = {
 
 
 def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
-    """Accurately calculates age in years, months, and days from current UTC date."""
     birth_date = date.fromisoformat(dob_str)
     today = date.today()
 
@@ -250,7 +248,6 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
     def get_networth() -> Any:
         summary = fetch_account_summary()
         
-        # Calculate dynamic liquid bank totals incorporating opening balance
         bank_balances: dict[str, float] = {}
         for acc_id, opening in USER_PROFILE["opening_balances"].items():
             bank_balances[acc_id] = opening
@@ -259,7 +256,7 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
             acc_id = item.get("account_id", "UNKNOWN")
             inc = float(item.get("total_income", 0.0))
             exp = float(item.get("total_expenses", 0.0))
-            bank_balances[acc_id] = bank_balances.get(acc_id, 0.0) + (inc - exp)
+            bank_balances[acc_id] = round(bank_balances.get(acc_id, 0.0) + (inc - exp), 2)
 
         total_liquid_bank = sum(bank_balances.values())
         offline_cash = USER_PROFILE["portfolio"]["offline_cash"]
