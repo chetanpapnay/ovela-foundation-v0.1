@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import re
+import traceback
 import urllib.request
 from datetime import date, datetime
 from decimal import Decimal
@@ -14,7 +15,6 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-from starlette.types import Receive, Scope, Send
 
 from .http.api import ApiConfig, OvelaApi
 from .ingest_router import register_ingest_endpoints
@@ -29,32 +29,31 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
-MAX_REQUEST_BODY_BYTES = 256 * 1024
 
 
 def fetch_live_amfi_nav(amfi_code: str, fallback: float = 90.8844) -> tuple[float, str]:
     url = f"https://api.mfapi.in/mf/{amfi_code}/latest"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=4) as resp:
             data = json.loads(resp.read().decode())
             data_arr = data.get("data", [])
             if data_arr:
                 return float(data_arr[0].get("nav", fallback)), str(data_arr[0].get("date", ""))
     except Exception:
         pass
-    return fallback, "fallback"
+    return fallback, "offline_fallback"
 
 
 def fetch_live_gold_price(symbol: str, fallback: float = 132.34) -> float:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=4) as resp:
             data = json.loads(resp.read().decode())
             meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
             price = meta.get("regularMarketPrice", None)
@@ -66,7 +65,9 @@ def fetch_live_gold_price(symbol: str, fallback: float = 132.34) -> float:
 
 
 def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
-    birth_date = date.fromisoformat(dob_str)
+    # Extract only YYYY-MM-DD in case a timestamp string is returned from postgres
+    clean_dob = str(dob_str).split("T")[0].strip()
+    birth_date = date.fromisoformat(clean_dob)
     today = date.today()
 
     years = today.year - birth_date.year
@@ -85,7 +86,7 @@ def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
         months += 12
 
     return {
-        "dob": dob_str,
+        "dob": clean_dob,
         "as_of_date": today.isoformat(),
         "years": years,
         "months": months,
@@ -95,7 +96,6 @@ def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
 
 
 def jurix_tool_ground_truth() -> dict[str, Any]:
-    """Zero-hallucination ground truth retrieval engine."""
     profile = fetch_user_profile()
     dob_str = str(profile.get("date_of_birth", "2006-03-04"))
     age_info = calculate_dynamic_age(dob_str)
@@ -222,71 +222,78 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
 
     @app_instance.get("/api/profile")
     def get_profile() -> Any:
-        profile = fetch_user_profile()
-        return {
-            "name": profile.get("full_name"),
-            "dob": profile.get("date_of_birth"),
-            "dynamic_age": calculate_dynamic_age(str(profile.get("date_of_birth"))),
-            "base_currency": profile.get("base_currency"),
-        }
+        try:
+            profile = fetch_user_profile()
+            return {
+                "name": profile.get("full_name"),
+                "dob": profile.get("date_of_birth"),
+                "dynamic_age": calculate_dynamic_age(str(profile.get("date_of_birth"))),
+                "base_currency": profile.get("base_currency"),
+            }
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc), "trace": traceback.format_exc()})
 
     @app_instance.get("/api/networth")
     def get_networth() -> Any:
-        return jurix_tool_ground_truth()
+        try:
+            return jurix_tool_ground_truth()
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc), "trace": traceback.format_exc()})
 
     @app_instance.post("/api/jurix/chat")
     def jurix_conversational_brain(req: JurixChatRequest) -> Any:
-        """Jurix AI Intelligence Engine: Natural query execution grounded in real verified financial data."""
-        data = jurix_tool_ground_truth()
-        q = req.message.lower().strip()
+        try:
+            data = jurix_tool_ground_truth()
+            q = req.message.lower().strip()
 
-        # Deterministic Grounded Reasoning
-        if any(w in q for w in ["age", "old", "dob", "birth"]):
-            age = data["dynamic_age"]
-            reply = f"Chetan, as of today ({age['as_of_date']}), your exact age is {age['formatted_age']} (born {age['dob']})."
-        
-        elif any(w in q for w in ["net worth", "total worth", "wealth", "balance"]):
-            reply = (
-                f"Your total net worth is ₹{data['net_worth_inr']:,}.\n"
-                f"• Liquid Bank Accounts: ₹{data['total_bank_cash']:,}\n"
-                f"• Offline Cash in Hand: ₹{data['offline_cash']:,}\n"
-                f"• Live Investment Portfolio: ₹{data['investments_summary']['total_current_market_value']:,} "
-                f"(Profit/Loss: ₹{data['investments_summary']['total_unrealized_profit']:,})"
-            )
-
-        elif any(w in q for w in ["gold", "mf", "mutual fund", "groww", "etf", "invest"]):
-            inv_lines = []
-            for item in data["investments"]:
-                inv_lines.append(
-                    f"• {item['name']}: {item['units']} units | Invested: ₹{item['invested']} | "
-                    f"Current Value: ₹{item['current_value']} (P&L: ₹{item['profit']})"
+            if any(w in q for w in ["age", "old", "dob", "birth"]):
+                age = data["dynamic_age"]
+                reply = f"Chetan, as of today ({age['as_of_date']}), your exact age is {age['formatted_age']} (born {age['dob']})."
+            
+            elif any(w in q for w in ["net worth", "total worth", "wealth", "balance"]):
+                reply = (
+                    f"Your total net worth is ₹{data['net_worth_inr']:,}.\n"
+                    f"• Liquid Bank Accounts: ₹{data['total_bank_cash']:,}\n"
+                    f"• Offline Cash in Hand: ₹{data['offline_cash']:,}\n"
+                    f"• Live Investment Portfolio: ₹{data['investments_summary']['total_current_market_value']:,} "
+                    f"(Unrealized P&L: ₹{data['investments_summary']['total_unrealized_profit']:,})"
                 )
-            reply = (
-                f"Your investment portfolio on Groww currently stands at ₹{data['investments_summary']['total_current_market_value']:,} "
-                f"(Total invested: ₹{data['investments_summary']['total_invested']:,}, Net P&L: ₹{data['investments_summary']['total_unrealized_profit']:,}):\n"
-                + "\n".join(inv_lines)
-            )
 
-        elif any(w in q for w in ["kotak", "bank", "cash", "offline"]):
-            reply = (
-                f"Liquid Cash Breakdown:\n"
-                f"• Kotak Bank Account: ₹{data['liquid_bank_balances'].get('KOTAK_BANK', 0.0):,}\n"
-                f"• Offline Cash in Hand: ₹{data['offline_cash']:,}\n"
-                f"Total Liquid Reserves: ₹{data['total_bank_cash'] + data['offline_cash']:,}"
-            )
+            elif any(w in q for w in ["gold", "mf", "mutual fund", "groww", "etf", "invest"]):
+                inv_lines = []
+                for item in data["investments"]:
+                    inv_lines.append(
+                        f"• {item['name']}: {item['units']} units | Invested: ₹{item['invested']} | "
+                        f"Current Value: ₹{item['current_value']} (P&L: ₹{item['profit']})"
+                    )
+                reply = (
+                    f"Your investment portfolio on Groww is currently valued at ₹{data['investments_summary']['total_current_market_value']:,} "
+                    f"(Total Invested: ₹{data['investments_summary']['total_invested']:,}, Net P&L: ₹{data['investments_summary']['total_unrealized_profit']:,}):\n"
+                    + "\n".join(inv_lines)
+                )
 
-        else:
-            reply = (
-                f"Hello Chetan. I am Jurix, connected directly to your ledger and portfolio.\n"
-                f"• Current Net Worth: ₹{data['net_worth_inr']:,}\n"
-                f"• Age: {data['dynamic_age']['formatted_age']}\n"
-                f"Ask me anything about your bank transactions, Groww holdings, or cash reserves."
-            )
+            elif any(w in q for w in ["kotak", "bank", "cash", "offline"]):
+                reply = (
+                    f"Liquid Cash Breakdown:\n"
+                    f"• Kotak Bank Account: ₹{data['liquid_bank_balances'].get('KOTAK_BANK', 0.0):,}\n"
+                    f"• Offline Cash in Hand: ₹{data['offline_cash']:,}\n"
+                    f"Total Liquid Reserves: ₹{data['total_bank_cash'] + data['offline_cash']:,}"
+                )
 
-        return {
-            "jurix_response": reply,
-            "grounded_data": data
-        }
+            else:
+                reply = (
+                    f"Hello Chetan. I am Jurix, connected directly to your ledger and portfolio.\n"
+                    f"• Current Net Worth: ₹{data['net_worth_inr']:,}\n"
+                    f"• Age: {data['dynamic_age']['formatted_age']}\n"
+                    f"Ask me anything about your bank balance, Groww holdings, or cash reserves."
+                )
+
+            return {
+                "jurix_response": reply,
+                "grounded_data": data
+            }
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc), "trace": traceback.format_exc()})
 
     @app_instance.get("/api/transactions")
     def get_live_transactions(limit: int = 50) -> Any:
