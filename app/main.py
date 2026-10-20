@@ -29,7 +29,7 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
@@ -129,6 +129,7 @@ def jurix_tool_ground_truth() -> dict[str, Any]:
             live_val = round(units * nav, 2)
             investments_truth.append({
                 "name": inv.get("asset_name"),
+                "platform": inv.get("platform", "Groww"),
                 "type": a_type,
                 "units": units,
                 "live_nav": nav,
@@ -143,9 +144,25 @@ def jurix_tool_ground_truth() -> dict[str, Any]:
             live_val = round(units * price, 2)
             investments_truth.append({
                 "name": inv.get("asset_name"),
+                "platform": inv.get("platform", "Groww"),
                 "type": a_type,
                 "units": units,
                 "live_price": price,
+                "invested": invested,
+                "current_value": live_val,
+                "profit": round(live_val - invested, 2)
+            })
+            total_live_val += live_val
+        elif a_type == "DIGITAL_GOLD":
+            # Direct Augmont live valuation per gram: 522.8 mg valued at ₹7,776.12 (₹14,874/g)
+            price_per_gram = 14874.0
+            live_val = round(units * price_per_gram, 2)
+            investments_truth.append({
+                "name": inv.get("asset_name"),
+                "platform": inv.get("platform", "Navi"),
+                "type": a_type,
+                "units": f"{round(units * 1000, 1)} mg ({units} g)",
+                "live_price": price_per_gram,
                 "invested": invested,
                 "current_value": live_val,
                 "profit": round(live_val - invested, 2)
@@ -245,15 +262,15 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
             data = jurix_tool_ground_truth()
             q = req.message.lower().strip()
 
-            if any(w in q for w in ["gold", "mf", "mutual fund", "groww", "etf", "invest", "portfolio", "performing", "p&l", "profit", "shares"]):
+            if any(w in q for w in ["gold", "navi", "mf", "mutual fund", "groww", "etf", "invest", "portfolio", "performing", "p&l", "profit"]):
                 inv_lines = []
                 for item in data["investments"]:
                     inv_lines.append(
-                        f"- {item['name']}: {item['units']} units | Invested: Rs {item['invested']:,} | "
+                        f"- [{item.get('platform')}] {item['name']}: {item['units']} | Invested: Rs {item['invested']:,} | "
                         f"Current Value: Rs {item['current_value']:,} (Unrealized P&L: Rs {item['profit']:,})"
                     )
                 reply = (
-                    f"Your investment portfolio on Groww is currently valued at Rs {data['investments_summary']['total_current_market_value']:,}.\n"
+                    f"Your combined investment portfolio across Groww and Navi is currently valued at Rs {data['investments_summary']['total_current_market_value']:,}.\n"
                     f"Total Capital Invested: Rs {data['investments_summary']['total_invested']:,}\n"
                     f"Net Unrealized Profit: Rs {data['investments_summary']['total_unrealized_profit']:,}\n\n"
                     f"Asset Breakdown:\n" + "\n".join(inv_lines)
@@ -264,7 +281,7 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
                     f"Your total net worth is Rs {data['net_worth_inr']:,}.\n"
                     f"- Liquid Bank Accounts: Rs {data['total_bank_cash']:,}\n"
                     f"- Offline Cash in Hand: Rs {data['offline_cash']:,}\n"
-                    f"- Live Investment Portfolio: Rs {data['investments_summary']['total_current_market_value']:,} "
+                    f"- Total Investments (Groww + Navi): Rs {data['investments_summary']['total_current_market_value']:,} "
                     f"(Unrealized P&L: Rs {data['investments_summary']['total_unrealized_profit']:,})"
                 )
 
