@@ -30,7 +30,7 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.8"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
@@ -100,15 +100,22 @@ def jurix_tool_ground_truth() -> dict[str, Any]:
     dob_str = str(profile.get("date_of_birth", "2006-03-04"))
     age_info = calculate_dynamic_age(dob_str)
     
-    summary = fetch_account_summary()
     opening_balances = {"KOTAK_BANK": 3162.76}
     bank_balances: dict[str, float] = {k: v for k, v in opening_balances.items()}
 
-    for item in summary:
-        acc_id = item.get("account_id", "UNKNOWN")
-        inc = float(item.get("total_income", 0.0))
-        exp = float(item.get("total_expenses", 0.0))
-        bank_balances[acc_id] = round(bank_balances.get(acc_id, 0.0) + (inc - exp), 2)
+    # Calculate net delta from all recorded transactions
+    recent_events = fetch_recent_transactions(limit=500)
+    for evt in recent_events:
+        acc = evt.get("account_id")
+        amt = float(evt.get("amount", 0.0))
+        direction = str(evt.get("direction", "DEBIT")).upper()
+        if acc:
+            if acc not in bank_balances:
+                bank_balances[acc] = 0.0
+            if direction == "CREDIT":
+                bank_balances[acc] = round(bank_balances[acc] + amt, 2)
+            else:
+                bank_balances[acc] = round(bank_balances[acc] - amt, 2)
 
     total_bank = sum(bank_balances.values())
     offline_cash = float(profile.get("offline_cash_in_hand", 3500.0))
@@ -189,18 +196,6 @@ def jurix_tool_ground_truth() -> dict[str, Any]:
 
 class JurixChatRequest(BaseModel):
     message: str
-
-
-class FinancialEventCreate(BaseModel):
-    account_id: str
-    source_id: str = "RENDER_CLI"
-    source_event_id: str
-    event_type: str = "EXPENSE"
-    amount: float = Field(..., gt=0)
-    currency: str = "INR"
-    direction: str = "DEBIT"
-    merchant: str = "Unknown"
-    note: str = ""
 
 
 class RawSmsPayload(BaseModel):
@@ -313,11 +308,14 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
             text = payload.message
             upper = text.upper()
 
-            amt_match = re.search(r"(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
+            amt_match = re.search(r"(?:Rs\.?|INR|₹)\s*([\d]+(?:,\d+)*(?:\.\d{1,2})?)", text, re.IGNORECASE)
             if not amt_match:
                 raise HTTPException(status_code=400, detail="No currency or amount detected")
             
-            raw_amt = amt_match.group(1).replace(",", "")
+            raw_amt = amt_match.group(1).replace(",", "").strip()
+            if not raw_amt:
+                raise HTTPException(status_code=400, detail="Empty amount parsed")
+            
             amount = float(raw_amt)
             if amount <= 0:
                 raise HTTPException(status_code=400, detail="Transaction amount must be greater than zero")
