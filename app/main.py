@@ -6,6 +6,7 @@ import os
 import re
 import traceback
 import urllib.request
+import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -29,7 +30,7 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
@@ -154,7 +155,6 @@ def jurix_tool_ground_truth() -> dict[str, Any]:
             })
             total_live_val += live_val
         elif a_type == "DIGITAL_GOLD":
-            # Direct Augmont live valuation per gram: 522.8 mg valued at ₹7,776.12 (₹14,874/g)
             price_per_gram = 14874.0
             live_val = round(units * price_per_gram, 2)
             investments_truth.append({
@@ -206,19 +206,10 @@ class FinancialEventCreate(BaseModel):
 class RawSmsPayload(BaseModel):
     message: str
     account_id: str = "AUTO_DETECT"
+    email_id: str | None = None
 
 
 ledger = AppendOnlyLedger()
-
-
-def require_internal_key(x_ovela_internal_key: str | None = Header(default=None)) -> None:
-    expected = os.getenv("OVELA_INTERNAL_KEY")
-    if not expected:
-        raise HTTPException(status_code=503, detail="internal key unconfigured")
-    if x_ovela_internal_key is None or not hmac.compare_digest(
-        x_ovela_internal_key.encode("utf-8"), expected.encode("utf-8")
-    ):
-        raise HTTPException(status_code=403, detail="internal authorization failed")
 
 
 def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfig | None = None) -> FastAPI:
@@ -316,74 +307,70 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
     def get_live_transactions(limit: int = 50) -> Any:
         return fetch_recent_transactions(limit=limit)
 
-    @app_instance.post("/api/transactions", status_code=201)
-    def create_live_transaction(payload: FinancialEventCreate) -> Any:
-        return insert_financial_event(
-            account_id=payload.account_id,
-            source_id=payload.source_id,
-            source_event_id=payload.source_event_id,
-            event_type=payload.event_type,
-            amount=payload.amount,
-            currency=payload.currency,
-            direction=payload.direction,
-            merchant=payload.merchant,
-            note=payload.note,
-        )
-
     @app_instance.post("/api/ingest/sms", status_code=201)
     def auto_ingest_sms(payload: RawSmsPayload) -> Any:
-        text = payload.message
-        upper = text.upper()
+        try:
+            text = payload.message
+            upper = text.upper()
 
-        amt_match = re.search(r"(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
-        if not amt_match:
-            raise HTTPException(status_code=400, detail="No currency or amount detected")
-        amount = float(amt_match.group(1).replace(",", ""))
+            amt_match = re.search(r"(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
+            if not amt_match:
+                raise HTTPException(status_code=400, detail="No currency or amount detected")
+            
+            raw_amt = amt_match.group(1).replace(",", "")
+            amount = float(raw_amt)
+            if amount <= 0:
+                raise HTTPException(status_code=400, detail="Transaction amount must be greater than zero")
 
-        is_debit = bool(re.search(r"\b(debited|spent|sent|paid|withdrawn|purchase|transferred to|deducted)\b", text, re.IGNORECASE))
-        direction = "DEBIT" if is_debit else "CREDIT"
-        event_type = "EXPENSE" if is_debit else "INCOME"
+            is_debit = bool(re.search(r"\b(debited|spent|sent|paid|withdrawn|purchase|deducted|transferred to)\b", text, re.IGNORECASE))
+            direction = "DEBIT" if is_debit else "CREDIT"
+            event_type = "EXPENSE" if is_debit else "INCOME"
 
-        account_id = payload.account_id
-        if account_id == "AUTO_DETECT":
-            if "NAVI" in upper:
-                account_id = "NAVI_UPI"
-            elif "GPAY" in upper or "GOOGLE PAY" in upper:
-                account_id = "GOOGLE_PAY"
-            elif "KOTAK" in upper:
-                account_id = "KOTAK_BANK"
-            elif "BARODA" in upper or "BOB" in upper:
-                account_id = "BOB_BANK"
-            elif "HDFC" in upper:
-                account_id = "HDFC_BANK"
-            elif "SBI" in upper or "STATE BANK" in upper:
-                account_id = "SBI_BANK"
-            else:
-                account_id = "PRIMARY_UPI_ACCOUNT"
+            account_id = payload.account_id
+            if account_id == "AUTO_DETECT":
+                if "NAVI" in upper:
+                    account_id = "NAVI_UPI"
+                elif "GPAY" in upper or "GOOGLE PAY" in upper:
+                    account_id = "GOOGLE_PAY"
+                elif "KOTAK" in upper:
+                    account_id = "KOTAK_BANK"
+                elif "BARODA" in upper or "BOB" in upper:
+                    account_id = "BOB_BANK"
+                elif "GROWW" in upper:
+                    account_id = "GROWW"
+                else:
+                    account_id = "PRIMARY_UPI_ACCOUNT"
 
-        vpa_match = re.search(r"\b([a-zA-Z0-9.\-_]{2,35}@[a-zA-Z]{2,15})\b", text)
-        merchant_match = re.search(
-            r"(?:to|at|info|vpa|transferred to|paid to|remitter\s*(?:name)?[:\s]+)\s+([A-Za-z0-9\s\.\-_&]+?)(?=\s+(?:on|ref|via|avl|bal|upi|dated|from|for)|\.|$)",
-            text,
-            re.IGNORECASE,
-        )
+            vpa_match = re.search(r"\b([a-zA-Z0-9.\-_]{2,35}@[a-zA-Z]{2,15})\b", text)
+            merchant_match = re.search(
+                r"(?:to|at|info|vpa|transferred to|paid to|remitter\s*(?:name)?[:\s]+)\s+([A-Za-z0-9\s\.\-_&]+?)(?=\s+(?:on|ref|via|avl|bal|upi|dated|from|for)|\.|$)",
+                text,
+                re.IGNORECASE,
+            )
 
-        merchant = vpa_match.group(1).strip() if vpa_match and "kotak" not in vpa_match.group(1).lower() else (
-            merchant_match.group(1).strip() if merchant_match else "UPI Transaction"
-        )
+            merchant = vpa_match.group(1).strip() if vpa_match and "kotak" not in vpa_match.group(1).lower() else (
+                merchant_match.group(1).strip() if merchant_match else "UPI Transaction"
+            )
 
-        timestamp_id = int(datetime.utcnow().timestamp())
-        return insert_financial_event(
-            account_id=account_id,
-            source_id="PHONE_SMS_AUTO",
-            source_event_id=f"AUTO-{timestamp_id}",
-            event_type=event_type,
-            amount=amount,
-            currency="INR",
-            direction=direction,
-            merchant=merchant,
-            note=text[:150],
-        )
+            unique_id = f"EMAIL-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex[:6]}"
+
+            saved = insert_financial_event(
+                account_id=account_id,
+                source_id="GMAIL_AUTO",
+                source_event_id=unique_id,
+                event_type=event_type,
+                amount=amount,
+                currency="INR",
+                direction=direction,
+                merchant=merchant[:100],
+                note=text[:150],
+            )
+            return {"status": "success", "event": saved}
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc), "trace": traceback.format_exc()})
 
     @app_instance.get("/api/summary")
     def get_live_summary() -> Any:
@@ -398,4 +385,3 @@ app = create_application()
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
-
