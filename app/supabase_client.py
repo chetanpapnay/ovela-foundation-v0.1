@@ -97,7 +97,7 @@ def fetch_user_investments() -> list[dict[str, Any]]:
     try:
         client = get_client()
         response = client.table("user_investments").select("*").execute()
-        if response.data:
+        if response.data and len(response.data) >= 3:
             return response.data
     except Exception:
         pass
@@ -117,5 +117,13 @@ def fetch_user_investments() -> list[dict[str, Any]]:
             "units_held": 24.0,
             "invested_amount": 3176.16,
             "platform": "Groww"
+        },
+        {
+            "asset_type": "DIGITAL_GOLD",
+            "asset_name": "Navi Augmont 24K Digital Gold",
+            "ticker_or_code": "NAVI_GOLD_24K",
+            "units_held": 0.5228,
+            "invested_amount": 7695.21,
+            "platform": "Navi"
         }
     ]

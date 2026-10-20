@@ -29,7 +29,7 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.2.4"
+APP_VERSION = "0.2.5"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
@@ -398,3 +398,4 @@ app = create_application()
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+
