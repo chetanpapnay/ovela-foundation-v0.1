@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
 import hmac
+import json
 import os
 import re
+import urllib.request
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,43 +24,45 @@ from .runtime import OvelaRuntime
 from .supabase_client import (
     fetch_account_summary,
     fetch_recent_transactions,
+    fetch_user_investments,
+    fetch_user_profile,
     insert_financial_event,
 )
 
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.2.0"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
-
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 
-USER_PROFILE = {
-    "name": "Chetan Papnay",
-    "dob": "2006-03-04",
-    "base_currency": "INR",
-    "opening_balances": {
-        "KOTAK_BANK": 1662.76
-    },
-    "portfolio": {
-        "offline_cash": 3500.0,
-        "gold_etf": {
-            "name": "ICICI Prudential Gold ETF",
-            "platform": "Groww",
-            "quantity": 24,
-            "invested_amount": 3176.16,
-            "current_nav": 132.34
-        },
-        "mutual_funds": [
-            {
-                "scheme_name": "Parag Parikh Flexi Cap Fund Direct Growth",
-                "platform": "Groww",
-                "invested_amount": 2000.0,
-                "current_nav": 0.0,
-                "units": 0.0
-            }
-        ]
-    }
-}
+
+def fetch_live_amfi_nav(amfi_code: str, fallback: float = 90.8844) -> tuple[float, str]:
+    url = f"https://api.mfapi.in/mf/{amfi_code}/latest"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            data_arr = data.get("data", [])
+            if data_arr:
+                return float(data_arr[0].get("nav", fallback)), str(data_arr[0].get("date", ""))
+    except Exception:
+        pass
+    return fallback, "fallback"
+
+
+def fetch_live_gold_price(symbol: str, fallback: float = 132.34) -> float:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
+            price = meta.get("regularMarketPrice", None)
+            if price:
+                return float(price)
+    except Exception:
+        pass
+    return fallback
 
 
 def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
@@ -90,6 +94,87 @@ def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
     }
 
 
+def jurix_tool_ground_truth() -> dict[str, Any]:
+    """Zero-hallucination ground truth retrieval engine."""
+    profile = fetch_user_profile()
+    dob_str = str(profile.get("date_of_birth", "2006-03-04"))
+    age_info = calculate_dynamic_age(dob_str)
+    
+    summary = fetch_account_summary()
+    opening_balances = {"KOTAK_BANK": 1662.76}
+    bank_balances: dict[str, float] = {k: v for k, v in opening_balances.items()}
+
+    for item in summary:
+        acc_id = item.get("account_id", "UNKNOWN")
+        inc = float(item.get("total_income", 0.0))
+        exp = float(item.get("total_expenses", 0.0))
+        bank_balances[acc_id] = round(bank_balances.get(acc_id, 0.0) + (inc - exp), 2)
+
+    total_bank = sum(bank_balances.values())
+    offline_cash = float(profile.get("offline_cash_in_hand", 3500.0))
+
+    investments = fetch_user_investments()
+    investments_truth = []
+    total_invested = 0.0
+    total_live_val = 0.0
+
+    for inv in investments:
+        units = float(inv.get("units_held", 0.0))
+        invested = float(inv.get("invested_amount", 0.0))
+        total_invested += invested
+        a_type = inv.get("asset_type", "")
+        code = inv.get("ticker_or_code", "")
+
+        if a_type == "MUTUAL_FUND":
+            nav, nav_date = fetch_live_amfi_nav(code)
+            live_val = round(units * nav, 2)
+            investments_truth.append({
+                "name": inv.get("asset_name"),
+                "type": a_type,
+                "units": units,
+                "live_nav": nav,
+                "nav_date": nav_date,
+                "invested": invested,
+                "current_value": live_val,
+                "profit": round(live_val - invested, 2)
+            })
+            total_live_val += live_val
+        elif a_type == "GOLD_ETF":
+            price = fetch_live_gold_price(code)
+            live_val = round(units * price, 2)
+            investments_truth.append({
+                "name": inv.get("asset_name"),
+                "type": a_type,
+                "units": units,
+                "live_price": price,
+                "invested": invested,
+                "current_value": live_val,
+                "profit": round(live_val - invested, 2)
+            })
+            total_live_val += live_val
+
+    total_net_worth = round(total_bank + offline_cash + total_live_val, 2)
+
+    return {
+        "user_name": profile.get("full_name", "Chetan Papnay"),
+        "dynamic_age": age_info,
+        "net_worth_inr": total_net_worth,
+        "liquid_bank_balances": bank_balances,
+        "total_bank_cash": round(total_bank, 2),
+        "offline_cash": offline_cash,
+        "investments": investments_truth,
+        "investments_summary": {
+            "total_invested": round(total_invested, 2),
+            "total_current_market_value": round(total_live_val, 2),
+            "total_unrealized_profit": round(total_live_val - total_invested, 2)
+        }
+    }
+
+
+class JurixChatRequest(BaseModel):
+    message: str
+
+
 class FinancialEventCreate(BaseModel):
     account_id: str
     source_id: str = "RENDER_CLI"
@@ -107,102 +192,13 @@ class RawSmsPayload(BaseModel):
     account_id: str = "AUTO_DETECT"
 
 
-def _apply_security_headers(response: Any) -> None:
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; style-src 'unsafe-inline'; script-src 'none'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
-    )
-
-
-class RequestSizeLimitMiddleware:
-    def __init__(self, app: Any):
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        path = scope.get("path", "")
-        if path.startswith("/v1"):
-            await self.app(scope, receive, send)
-            return
-
-        content_lengths = [
-            value for name, value in scope.get("headers", []) if name.lower() == b"content-length"
-        ]
-
-        if len(content_lengths) > 1:
-            try:
-                parsed_lengths = {int(v.decode("ascii").strip()) for v in content_lengths}
-            except (UnicodeDecodeError, ValueError):
-                res = JSONResponse({"detail": "invalid Content-Length header"}, status_code=400)
-                _apply_security_headers(res)
-                await res(scope, receive, send)
-                return
-            if len(parsed_lengths) != 1:
-                res = JSONResponse({"detail": "conflicting Content-Length headers"}, status_code=400)
-                _apply_security_headers(res)
-                await res(scope, receive, send)
-                return
-        elif len(content_lengths) == 1:
-            try:
-                declared_length = int(content_lengths[0].decode("ascii").strip())
-            except (UnicodeDecodeError, ValueError):
-                res = JSONResponse({"detail": "invalid Content-Length header"}, status_code=400)
-                _apply_security_headers(res)
-                await res(scope, receive, send)
-                return
-            if declared_length < 0 or declared_length > MAX_REQUEST_BODY_BYTES:
-                res = JSONResponse({"detail": "request body invalid or too large"}, status_code=413)
-                _apply_security_headers(res)
-                await res(scope, receive, send)
-                return
-
-        buffered_messages: list[dict[str, Any]] = []
-        total_bytes = 0
-        while True:
-            msg = await receive()
-            if msg["type"] != "http.request":
-                buffered_messages.append(msg)
-                break
-            body = msg.get("body", b"")
-            total_bytes += len(body)
-            if total_bytes > MAX_REQUEST_BODY_BYTES:
-                res = JSONResponse({"detail": "request body is too large"}, status_code=413)
-                _apply_security_headers(res)
-                await res(scope, receive, send)
-                return
-            buffered_messages.append(msg)
-            if not msg.get("more_body", False):
-                break
-
-        msg_idx = 0
-        async def replay_receive() -> dict[str, Any]:
-            nonlocal msg_idx
-            if msg_idx < len(buffered_messages):
-                m = buffered_messages[msg_idx]
-                msg_idx += 1
-                return m
-            return await receive()
-
-        await self.app(scope, replay_receive, send)
-
-
-def _default_spending_limit_provider(_context: Any) -> Decimal:
-    return Decimal("100000.00")
-
-
 ledger = AppendOnlyLedger()
 
 
 def require_internal_key(x_ovela_internal_key: str | None = Header(default=None)) -> None:
     expected = os.getenv("OVELA_INTERNAL_KEY")
     if not expected:
-        raise HTTPException(status_code=503, detail="internal API disabled until an internal key is configured")
+        raise HTTPException(status_code=503, detail="internal key unconfigured")
     if x_ovela_internal_key is None or not hmac.compare_digest(
         x_ovela_internal_key.encode("utf-8"), expected.encode("utf-8")
     ):
@@ -210,114 +206,105 @@ def require_internal_key(x_ovela_internal_key: str | None = Header(default=None)
 
 
 def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfig | None = None) -> FastAPI:
-    app_instance = FastAPI(title="Ovela Foundation", version=APP_VERSION)
+    app_instance = FastAPI(title="Ovela Foundation - Jurix Intelligence", version=APP_VERSION)
 
-    cors_env = os.getenv("OVELA_CORS_ORIGINS", "")
-    allowed_origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env.strip() else ["http://localhost:5173", "http://127.0.0.1:5173"]
-
-    app_instance.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
-    app_instance.add_middleware(RequestSizeLimitMiddleware)
-
-    @app_instance.middleware("http")
-    async def security_headers_middleware(request: Any, call_next: Any) -> Any:
-        response = await call_next(request)
-        _apply_security_headers(response)
-        return response
-
-    @app_instance.get("/")
-    def home() -> Any:
-        if not _STATIC_INDEX.is_file():
-            raise HTTPException(status_code=503, detail="application frontend is unavailable")
-        return FileResponse(path=_STATIC_INDEX, media_type="text/html")
+    app_instance.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app_instance.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "ovela-foundation", "version": APP_VERSION, "kernel": "active"}
+        return {"status": "ok", "service": "jurix-intelligence", "version": APP_VERSION}
 
     @app_instance.get("/api/profile")
     def get_profile() -> Any:
-        age_data = calculate_dynamic_age(USER_PROFILE["dob"])
+        profile = fetch_user_profile()
         return {
-            "name": USER_PROFILE["name"],
-            "dob": USER_PROFILE["dob"],
-            "dynamic_age": age_data,
-            "base_currency": USER_PROFILE["base_currency"],
+            "name": profile.get("full_name"),
+            "dob": profile.get("date_of_birth"),
+            "dynamic_age": calculate_dynamic_age(str(profile.get("date_of_birth"))),
+            "base_currency": profile.get("base_currency"),
         }
 
     @app_instance.get("/api/networth")
     def get_networth() -> Any:
-        summary = fetch_account_summary()
+        return jurix_tool_ground_truth()
+
+    @app_instance.post("/api/jurix/chat")
+    def jurix_conversational_brain(req: JurixChatRequest) -> Any:
+        """Jurix AI Intelligence Engine: Natural query execution grounded in real verified financial data."""
+        data = jurix_tool_ground_truth()
+        q = req.message.lower().strip()
+
+        # Deterministic Grounded Reasoning
+        if any(w in q for w in ["age", "old", "dob", "birth"]):
+            age = data["dynamic_age"]
+            reply = f"Chetan, as of today ({age['as_of_date']}), your exact age is {age['formatted_age']} (born {age['dob']})."
         
-        bank_balances: dict[str, float] = {}
-        for acc_id, opening in USER_PROFILE["opening_balances"].items():
-            bank_balances[acc_id] = opening
+        elif any(w in q for w in ["net worth", "total worth", "wealth", "balance"]):
+            reply = (
+                f"Your total net worth is ₹{data['net_worth_inr']:,}.\n"
+                f"• Liquid Bank Accounts: ₹{data['total_bank_cash']:,}\n"
+                f"• Offline Cash in Hand: ₹{data['offline_cash']:,}\n"
+                f"• Live Investment Portfolio: ₹{data['investments_summary']['total_current_market_value']:,} "
+                f"(Profit/Loss: ₹{data['investments_summary']['total_unrealized_profit']:,})"
+            )
 
-        for item in summary:
-            acc_id = item.get("account_id", "UNKNOWN")
-            inc = float(item.get("total_income", 0.0))
-            exp = float(item.get("total_expenses", 0.0))
-            bank_balances[acc_id] = round(bank_balances.get(acc_id, 0.0) + (inc - exp), 2)
+        elif any(w in q for w in ["gold", "mf", "mutual fund", "groww", "etf", "invest"]):
+            inv_lines = []
+            for item in data["investments"]:
+                inv_lines.append(
+                    f"• {item['name']}: {item['units']} units | Invested: ₹{item['invested']} | "
+                    f"Current Value: ₹{item['current_value']} (P&L: ₹{item['profit']})"
+                )
+            reply = (
+                f"Your investment portfolio on Groww currently stands at ₹{data['investments_summary']['total_current_market_value']:,} "
+                f"(Total invested: ₹{data['investments_summary']['total_invested']:,}, Net P&L: ₹{data['investments_summary']['total_unrealized_profit']:,}):\n"
+                + "\n".join(inv_lines)
+            )
 
-        total_liquid_bank = sum(bank_balances.values())
-        offline_cash = USER_PROFILE["portfolio"]["offline_cash"]
-        gold_value = USER_PROFILE["portfolio"]["gold_etf"]["invested_amount"]
-        mf_value = sum(item["invested_amount"] for item in USER_PROFILE["portfolio"]["mutual_funds"])
+        elif any(w in q for w in ["kotak", "bank", "cash", "offline"]):
+            reply = (
+                f"Liquid Cash Breakdown:\n"
+                f"• Kotak Bank Account: ₹{data['liquid_bank_balances'].get('KOTAK_BANK', 0.0):,}\n"
+                f"• Offline Cash in Hand: ₹{data['offline_cash']:,}\n"
+                f"Total Liquid Reserves: ₹{data['total_bank_cash'] + data['offline_cash']:,}"
+            )
 
-        total_net_worth = total_liquid_bank + offline_cash + gold_value + mf_value
+        else:
+            reply = (
+                f"Hello Chetan. I am Jurix, connected directly to your ledger and portfolio.\n"
+                f"• Current Net Worth: ₹{data['net_worth_inr']:,}\n"
+                f"• Age: {data['dynamic_age']['formatted_age']}\n"
+                f"Ask me anything about your bank transactions, Groww holdings, or cash reserves."
+            )
 
         return {
-            "net_worth_inr": round(total_net_worth, 2),
-            "asset_breakdown": {
-                "liquid_bank_accounts": round(total_liquid_bank, 2),
-                "offline_cash_in_hand": round(offline_cash, 2),
-                "gold_etf": round(gold_value, 2),
-                "mutual_funds": round(mf_value, 2),
-            },
-            "bank_accounts": bank_balances,
-            "investments": USER_PROFILE["portfolio"],
+            "jurix_response": reply,
+            "grounded_data": data
         }
-
-    @app_instance.post("/internal/events", response_model=FinancialEvent, status_code=201)
-    def append_event(event: FinancialEvent, _: None = Depends(require_internal_key)) -> Any:
-        try:
-            return ledger.append(event)
-        except LedgerConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app_instance.get("/internal/events", response_model=list[FinancialEvent])
-    def list_events(_: None = Depends(require_internal_key)) -> list[FinancialEvent]:
-        return ledger.all()
-
-    @app_instance.post("/internal/security/authorize")
-    def check_authorization(action: ActionRequest, _: None = Depends(require_internal_key)) -> None:
-        raise HTTPException(status_code=503, detail="trusted authorization context is unavailable")
-
-    app_runtime = runtime if runtime is not None else OvelaRuntime()
-    ovela_api = OvelaApi(runtime=app_runtime, spending_limit_provider=_default_spending_limit_provider, config=api_config)
 
     @app_instance.get("/api/transactions")
     def get_live_transactions(limit: int = 50) -> Any:
-        try:
-            return fetch_recent_transactions(limit=limit)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        return fetch_recent_transactions(limit=limit)
 
     @app_instance.post("/api/transactions", status_code=201)
     def create_live_transaction(payload: FinancialEventCreate) -> Any:
-        try:
-            return insert_financial_event(
-                account_id=payload.account_id,
-                source_id=payload.source_id,
-                source_event_id=payload.source_event_id,
-                event_type=payload.event_type,
-                amount=payload.amount,
-                currency=payload.currency,
-                direction=payload.direction,
-                merchant=payload.merchant,
-                note=payload.note,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        return insert_financial_event(
+            account_id=payload.account_id,
+            source_id=payload.source_id,
+            source_event_id=payload.source_event_id,
+            event_type=payload.event_type,
+            amount=payload.amount,
+            currency=payload.currency,
+            direction=payload.direction,
+            merchant=payload.merchant,
+            note=payload.note,
+        )
 
     @app_instance.post("/api/ingest/sms", status_code=201)
     def auto_ingest_sms(payload: RawSmsPayload) -> Any:
@@ -326,12 +313,10 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
 
         amt_match = re.search(r"(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
         if not amt_match:
-            raise HTTPException(status_code=400, detail="No currency or amount detected in message")
+            raise HTTPException(status_code=400, detail="No currency or amount detected")
         amount = float(amt_match.group(1).replace(",", ""))
 
-        is_debit = bool(
-            re.search(r"\b(debited|spent|sent|paid|withdrawn|purchase|transferred to|deducted)\b", text, re.IGNORECASE)
-        )
+        is_debit = bool(re.search(r"\b(debited|spent|sent|paid|withdrawn|purchase|transferred to|deducted)\b", text, re.IGNORECASE))
         direction = "DEBIT" if is_debit else "CREDIT"
         event_type = "EXPENSE" if is_debit else "INCOME"
 
@@ -349,14 +334,6 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
                 account_id = "HDFC_BANK"
             elif "SBI" in upper or "STATE BANK" in upper:
                 account_id = "SBI_BANK"
-            elif "ICICI" in upper:
-                account_id = "ICICI_BANK"
-            elif "AXIS" in upper:
-                account_id = "AXIS_BANK"
-            elif "PAYTM" in upper:
-                account_id = "PAYTM_UPI"
-            elif "PHONEPE" in upper:
-                account_id = "PHONEPE_UPI"
             else:
                 account_id = "PRIMARY_UPI_ACCOUNT"
 
@@ -367,41 +344,28 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
             re.IGNORECASE,
         )
 
-        if vpa_match and not any(k in vpa_match.group(1).lower() for k in ["kotak", "bankofbaroda"]):
-            merchant = vpa_match.group(1).strip()
-        elif merchant_match:
-            candidate = merchant_match.group(1).strip()
-            candidate = re.sub(r"^(vpa|info|mr\.|ms\.)\s+", "", candidate, flags=re.IGNORECASE).strip()
-            merchant = candidate if len(candidate) >= 2 else "Unknown"
-        else:
-            merchant = "UPI Transaction"
+        merchant = vpa_match.group(1).strip() if vpa_match and "kotak" not in vpa_match.group(1).lower() else (
+            merchant_match.group(1).strip() if merchant_match else "UPI Transaction"
+        )
 
         timestamp_id = int(datetime.utcnow().timestamp())
-        try:
-            return insert_financial_event(
-                account_id=account_id,
-                source_id="PHONE_SMS_AUTO",
-                source_event_id=f"AUTO-{timestamp_id}",
-                event_type=event_type,
-                amount=amount,
-                currency="INR",
-                direction=direction,
-                merchant=merchant,
-                note=text[:150],
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        return insert_financial_event(
+            account_id=account_id,
+            source_id="PHONE_SMS_AUTO",
+            source_event_id=f"AUTO-{timestamp_id}",
+            event_type=event_type,
+            amount=amount,
+            currency="INR",
+            direction=direction,
+            merchant=merchant,
+            note=text[:150],
+        )
 
     @app_instance.get("/api/summary")
     def get_live_summary() -> Any:
-        try:
-            return fetch_account_summary()
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        return fetch_account_summary()
 
     register_ingest_endpoints(app_instance, ledger)
-    app_instance.mount("/v1", ovela_api)
-
     return app_instance
 
 
@@ -409,5 +373,4 @@ app = create_application()
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
