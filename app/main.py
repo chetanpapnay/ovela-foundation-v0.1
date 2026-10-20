@@ -29,7 +29,7 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
@@ -100,7 +100,7 @@ def jurix_tool_ground_truth() -> dict[str, Any]:
     age_info = calculate_dynamic_age(dob_str)
     
     summary = fetch_account_summary()
-    opening_balances = {"KOTAK_BANK": 1662.76}
+    opening_balances = {"KOTAK_BANK": 3162.76}
     bank_balances: dict[str, float] = {k: v for k, v in opening_balances.items()}
 
     for item in summary:
@@ -245,7 +245,6 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
             data = jurix_tool_ground_truth()
             q = req.message.lower().strip()
 
-            # 1. Investment & Portfolio Intent (Checked first to avoid age/profile false triggers)
             if any(w in q for w in ["gold", "mf", "mutual fund", "groww", "etf", "invest", "portfolio", "performing", "p&l", "profit", "shares"]):
                 inv_lines = []
                 for item in data["investments"]:
@@ -260,7 +259,6 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
                     f"Asset Breakdown:\n" + "\n".join(inv_lines)
                 )
 
-            # 2. Net Worth Intent
             elif any(w in q for w in ["net worth", "total worth", "wealth", "overall balance", "total asset"]):
                 reply = (
                     f"Your total net worth is Rs {data['net_worth_inr']:,}.\n"
@@ -270,7 +268,6 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
                     f"(Unrealized P&L: Rs {data['investments_summary']['total_unrealized_profit']:,})"
                 )
 
-            # 3. Bank & Cash Breakdown Intent
             elif any(w in q for w in ["kotak", "bank", "cash", "offline", "liquid"]):
                 reply = (
                     f"Liquid Cash Breakdown:\n"
@@ -279,12 +276,10 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
                     f"Total Available Liquid Reserves: Rs {data['total_bank_cash'] + data['offline_cash']:,}"
                 )
 
-            # 4. Identity & Dynamic Age Intent
             elif any(w in q for w in ["age", "old", "dob", "birth", "birthday"]):
                 age = data["dynamic_age"]
                 reply = f"Chetan, as of today ({age['as_of_date']}), your exact age is {age['formatted_age']} (born {age['dob']})."
 
-            # 5. Fallback Prompt
             else:
                 reply = (
                     f"Hello Chetan. I am Jurix, connected directly to your ledger and portfolio.\n"
