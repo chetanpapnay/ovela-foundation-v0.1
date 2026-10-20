@@ -30,7 +30,8 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.2.8"
+APP_VERSION = "0.2.9"
+INGEST_SECRET = os.getenv("JURIX_INGEST_SECRET", "jurix_sec_9941a8e0f5c24e81b8529cb67035dbca")
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
@@ -103,7 +104,6 @@ def jurix_tool_ground_truth() -> dict[str, Any]:
     opening_balances = {"KOTAK_BANK": 3162.76}
     bank_balances: dict[str, float] = {k: v for k, v in opening_balances.items()}
 
-    # Calculate net delta from all recorded transactions
     recent_events = fetch_recent_transactions(limit=500)
     for evt in recent_events:
         acc = evt.get("account_id")
@@ -303,7 +303,10 @@ def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfi
         return fetch_recent_transactions(limit=limit)
 
     @app_instance.post("/api/ingest/sms", status_code=201)
-    def auto_ingest_sms(payload: RawSmsPayload) -> Any:
+    def auto_ingest_sms(payload: RawSmsPayload, x_jurix_secret: str | None = Header(default=None)) -> Any:
+        if not x_jurix_secret or x_jurix_secret.strip() != INGEST_SECRET:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid Jurix Ingestion Token")
+
         try:
             text = payload.message
             upper = text.upper()
