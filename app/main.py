@@ -25,31 +25,45 @@ from .supabase_client import (
     insert_financial_event,
 )
 
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _STATIC_INDEX = _BASE_DIR / "static" / "index.html"
 
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 
-
-# --- USER PROFILE & NET WORTH CONFIGURATION ---
+# --- USER PROFILE & PORTFOLIO ENGINE ---
 USER_PROFILE = {
     "name": "Chetan Papnay",
-    "dob": "2006-01-01",  # Placeholder: Updated when you share your exact details
+    "dob": "2006-03-04",
     "base_currency": "INR",
-    "assets": {
-        "offline_cash": 0.0,
-        "mutual_funds": 0.0,
-        "gold": 0.0,
-        "fixed_deposits": 0.0,
-        "crypto": 0.0,
+    "opening_balances": {
+        "KOTAK_BANK": 1662.76  # 3162.76 current balance minus the 1500 already in ledger
+    },
+    "portfolio": {
+        "offline_cash": 3500.0,
+        "gold_etf": {
+            "name": "ICICI Prudential Gold ETF",
+            "platform": "Groww",
+            "quantity": 24,
+            "invested_amount": 3176.16,
+            "current_nav": 132.34
+        },
+        "mutual_funds": [
+            {
+                "scheme_name": "Parag Parikh Flexi Cap Fund Direct Growth",
+                "platform": "Groww",
+                "invested_amount": 2000.0,
+                "current_nav": 0.0,
+                "units": 0.0
+            }
+        ]
     }
 }
 
 
 def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
-    """Calculates age in years, months, and days dynamically without third-party libraries."""
+    """Accurately calculates age in years, months, and days from current UTC date."""
     birth_date = date.fromisoformat(dob_str)
     today = date.today()
 
@@ -59,7 +73,6 @@ def calculate_dynamic_age(dob_str: str) -> dict[str, Any]:
 
     if days < 0:
         months -= 1
-        # Previous month day count approximation
         prev_month = 12 if today.month == 1 else today.month - 1
         year_for_month = today.year - 1 if today.month == 1 else today.year
         days_in_prev_month = (date(year_for_month, prev_month % 12 + 1, 1) - date(year_for_month, prev_month, 1)).days if prev_month != 12 else 31
@@ -100,17 +113,9 @@ def _apply_security_headers(response: Any) -> None:
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Permissions-Policy"] = (
-        "camera=(), microphone=(), geolocation=()"
-    )
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "style-src 'unsafe-inline'; "
-        "script-src 'none'; "
-        "img-src 'self' data:; "
-        "connect-src 'self'; "
-        "base-uri 'none'; "
-        "frame-ancestors 'none'"
+        "default-src 'self'; style-src 'unsafe-inline'; script-src 'none'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
     )
 
 
@@ -118,12 +123,7 @@ class RequestSizeLimitMiddleware:
     def __init__(self, app: Any):
         self.app = app
 
-    async def __call__(
-        self,
-        scope: Scope,
-        receive: Receive,
-        send: Send,
-    ) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -134,104 +134,61 @@ class RequestSizeLimitMiddleware:
             return
 
         content_lengths = [
-            value
-            for name, value in scope.get("headers", [])
-            if name.lower() == b"content-length"
+            value for name, value in scope.get("headers", []) if name.lower() == b"content-length"
         ]
 
         if len(content_lengths) > 1:
             try:
-                parsed_lengths = {
-                    int(value.decode("ascii").strip())
-                    for value in content_lengths
-                }
+                parsed_lengths = {int(v.decode("ascii").strip()) for v in content_lengths}
             except (UnicodeDecodeError, ValueError):
-                response = JSONResponse(
-                    {"detail": "invalid Content-Length header"},
-                    status_code=400,
-                )
-                _apply_security_headers(response)
-                await response(scope, receive, send)
+                res = JSONResponse({"detail": "invalid Content-Length header"}, status_code=400)
+                _apply_security_headers(res)
+                await res(scope, receive, send)
                 return
-
             if len(parsed_lengths) != 1:
-                response = JSONResponse(
-                    {"detail": "conflicting Content-Length headers"},
-                    status_code=400,
-                )
-                _apply_security_headers(response)
-                await response(scope, receive, send)
+                res = JSONResponse({"detail": "conflicting Content-Length headers"}, status_code=400)
+                _apply_security_headers(res)
+                await res(scope, receive, send)
                 return
-
         elif len(content_lengths) == 1:
             try:
-                declared_length = int(
-                    content_lengths[0].decode("ascii").strip()
-                )
+                declared_length = int(content_lengths[0].decode("ascii").strip())
             except (UnicodeDecodeError, ValueError):
-                response = JSONResponse(
-                    {"detail": "invalid Content-Length header"},
-                    status_code=400,
-                )
-                _apply_security_headers(response)
-                await response(scope, receive, send)
+                res = JSONResponse({"detail": "invalid Content-Length header"}, status_code=400)
+                _apply_security_headers(res)
+                await res(scope, receive, send)
                 return
-
-            if declared_length < 0:
-                response = JSONResponse(
-                    {"detail": "invalid Content-Length header"},
-                    status_code=400,
-                )
-                _apply_security_headers(response)
-                await response(scope, receive, send)
-                return
-
-            if declared_length > MAX_REQUEST_BODY_BYTES:
-                response = JSONResponse(
-                    {"detail": "request body is too large"},
-                    status_code=413,
-                )
-                _apply_security_headers(response)
-                await response(scope, receive, send)
+            if declared_length < 0 or declared_length > MAX_REQUEST_BODY_BYTES:
+                res = JSONResponse({"detail": "request body invalid or too large"}, status_code=413)
+                _apply_security_headers(res)
+                await res(scope, receive, send)
                 return
 
         buffered_messages: list[dict[str, Any]] = []
         total_bytes = 0
-
         while True:
-            message = await receive()
-
-            if message["type"] != "http.request":
-                buffered_messages.append(message)
+            msg = await receive()
+            if msg["type"] != "http.request":
+                buffered_messages.append(msg)
                 break
-
-            body = message.get("body", b"")
+            body = msg.get("body", b"")
             total_bytes += len(body)
-
             if total_bytes > MAX_REQUEST_BODY_BYTES:
-                response = JSONResponse(
-                    {"detail": "request body is too large"},
-                    status_code=413,
-                )
-                _apply_security_headers(response)
-                await response(scope, receive, send)
+                res = JSONResponse({"detail": "request body is too large"}, status_code=413)
+                _apply_security_headers(res)
+                await res(scope, receive, send)
                 return
-
-            buffered_messages.append(message)
-
-            if not message.get("more_body", False):
+            buffered_messages.append(msg)
+            if not msg.get("more_body", False):
                 break
 
-        message_index = 0
-
+        msg_idx = 0
         async def replay_receive() -> dict[str, Any]:
-            nonlocal message_index
-
-            if message_index < len(buffered_messages):
-                msg = buffered_messages[message_index]
-                message_index += 1
-                return msg
-
+            nonlocal msg_idx
+            if msg_idx < len(buffered_messages):
+                m = buffered_messages[msg_idx]
+                msg_idx += 1
+                return m
             return await receive()
 
         await self.app(scope, replay_receive, send)
@@ -244,49 +201,23 @@ def _default_spending_limit_provider(_context: Any) -> Decimal:
 ledger = AppendOnlyLedger()
 
 
-def require_internal_key(
-    x_ovela_internal_key: str | None = Header(default=None),
-) -> None:
+def require_internal_key(x_ovela_internal_key: str | None = Header(default=None)) -> None:
     expected = os.getenv("OVELA_INTERNAL_KEY")
     if not expected:
-        raise HTTPException(
-            status_code=503,
-            detail="internal API disabled until an internal key is configured",
-        )
+        raise HTTPException(status_code=503, detail="internal API disabled until an internal key is configured")
     if x_ovela_internal_key is None or not hmac.compare_digest(
-        x_ovela_internal_key.encode("utf-8"),
-        expected.encode("utf-8"),
+        x_ovela_internal_key.encode("utf-8"), expected.encode("utf-8")
     ):
-        raise HTTPException(
-            status_code=403,
-            detail="internal authorization failed",
-        )
+        raise HTTPException(status_code=403, detail="internal authorization failed")
 
 
-def create_application(
-    runtime: OvelaRuntime | None = None,
-    api_config: ApiConfig | None = None,
-) -> FastAPI:
-    app_instance = FastAPI(
-        title="Ovela Foundation",
-        version=APP_VERSION,
-    )
+def create_application(runtime: OvelaRuntime | None = None, api_config: ApiConfig | None = None) -> FastAPI:
+    app_instance = FastAPI(title="Ovela Foundation", version=APP_VERSION)
 
     cors_env = os.getenv("OVELA_CORS_ORIGINS", "")
-    allowed_origins = (
-        [origin.strip() for origin in cors_env.split(",") if origin.strip()]
-        if cors_env.strip()
-        else ["http://localhost:5173", "http://127.0.0.1:5173"]
-    )
+    allowed_origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env.strip() else ["http://localhost:5173", "http://127.0.0.1:5173"]
 
-    app_instance.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-    )
-
+    app_instance.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
     app_instance.add_middleware(RequestSizeLimitMiddleware)
 
     @app_instance.middleware("http")
@@ -298,20 +229,12 @@ def create_application(
     @app_instance.get("/")
     def home() -> Any:
         if not _STATIC_INDEX.is_file():
-            raise HTTPException(
-                status_code=503,
-                detail="application frontend is unavailable",
-            )
+            raise HTTPException(status_code=503, detail="application frontend is unavailable")
         return FileResponse(path=_STATIC_INDEX, media_type="text/html")
 
     @app_instance.get("/health")
     def health() -> dict[str, str]:
-        return {
-            "status": "ok",
-            "service": "ovela-foundation",
-            "version": APP_VERSION,
-            "kernel": "active",
-        }
+        return {"status": "ok", "service": "ovela-foundation", "version": APP_VERSION, "kernel": "active"}
 
     @app_instance.get("/api/profile")
     def get_profile() -> Any:
@@ -326,63 +249,54 @@ def create_application(
     @app_instance.get("/api/networth")
     def get_networth() -> Any:
         summary = fetch_account_summary()
-        online_liquid = 0.0
+        
+        # Calculate dynamic liquid bank totals incorporating opening balance
+        bank_balances: dict[str, float] = {}
+        for acc_id, opening in USER_PROFILE["opening_balances"].items():
+            bank_balances[acc_id] = opening
+
         for item in summary:
+            acc_id = item.get("account_id", "UNKNOWN")
             inc = float(item.get("total_income", 0.0))
             exp = float(item.get("total_expenses", 0.0))
-            online_liquid += (inc - exp)
+            bank_balances[acc_id] = bank_balances.get(acc_id, 0.0) + (inc - exp)
 
-        offline_cash = float(USER_PROFILE["assets"]["offline_cash"])
-        mutual_funds = float(USER_PROFILE["assets"]["mutual_funds"])
-        gold = float(USER_PROFILE["assets"]["gold"])
-        fixed_deposits = float(USER_PROFILE["assets"]["fixed_deposits"])
+        total_liquid_bank = sum(bank_balances.values())
+        offline_cash = USER_PROFILE["portfolio"]["offline_cash"]
+        gold_value = USER_PROFILE["portfolio"]["gold_etf"]["invested_amount"]
+        mf_value = sum(item["invested_amount"] for item in USER_PROFILE["portfolio"]["mutual_funds"])
 
-        total_net_worth = online_liquid + offline_cash + mutual_funds + gold + fixed_deposits
+        total_net_worth = total_liquid_bank + offline_cash + gold_value + mf_value
 
         return {
             "net_worth_inr": round(total_net_worth, 2),
-            "breakdown": {
-                "liquid_online_cash": round(online_liquid, 2),
+            "asset_breakdown": {
+                "liquid_bank_accounts": round(total_liquid_bank, 2),
                 "offline_cash_in_hand": round(offline_cash, 2),
-                "mutual_funds": round(mutual_funds, 2),
-                "gold": round(gold, 2),
-                "fixed_deposits": round(fixed_deposits, 2),
+                "gold_etf": round(gold_value, 2),
+                "mutual_funds": round(mf_value, 2),
             },
-            "bank_accounts": summary,
+            "bank_accounts": bank_balances,
+            "investments": USER_PROFILE["portfolio"],
         }
 
     @app_instance.post("/internal/events", response_model=FinancialEvent, status_code=201)
-    def append_event(
-        event: FinancialEvent,
-        _: None = Depends(require_internal_key),
-    ) -> Any:
+    def append_event(event: FinancialEvent, _: None = Depends(require_internal_key)) -> Any:
         try:
             return ledger.append(event)
         except LedgerConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app_instance.get("/internal/events", response_model=list[FinancialEvent])
-    def list_events(
-        _: None = Depends(require_internal_key),
-    ) -> list[FinancialEvent]:
+    def list_events(_: None = Depends(require_internal_key)) -> list[FinancialEvent]:
         return ledger.all()
 
     @app_instance.post("/internal/security/authorize")
-    def check_authorization(
-        action: ActionRequest,
-        _: None = Depends(require_internal_key),
-    ) -> None:
-        raise HTTPException(
-            status_code=503,
-            detail="trusted authorization context is unavailable",
-        )
+    def check_authorization(action: ActionRequest, _: None = Depends(require_internal_key)) -> None:
+        raise HTTPException(status_code=503, detail="trusted authorization context is unavailable")
 
     app_runtime = runtime if runtime is not None else OvelaRuntime()
-    ovela_api = OvelaApi(
-        runtime=app_runtime,
-        spending_limit_provider=_default_spending_limit_provider,
-        config=api_config,
-    )
+    ovela_api = OvelaApi(runtime=app_runtime, spending_limit_provider=_default_spending_limit_provider, config=api_config)
 
     @app_instance.get("/api/transactions")
     def get_live_transactions(limit: int = 50) -> Any:
@@ -419,11 +333,7 @@ def create_application(
         amount = float(amt_match.group(1).replace(",", ""))
 
         is_debit = bool(
-            re.search(
-                r"\b(debited|spent|sent|paid|withdrawn|purchase|transferred to|deducted)\b",
-                text,
-                re.IGNORECASE,
-            )
+            re.search(r"\b(debited|spent|sent|paid|withdrawn|purchase|transferred to|deducted)\b", text, re.IGNORECASE)
         )
         direction = "DEBIT" if is_debit else "CREDIT"
         event_type = "EXPENSE" if is_debit else "INCOME"
